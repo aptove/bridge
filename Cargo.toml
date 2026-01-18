@@ -1,0 +1,51 @@
+[package]
+name = "acp-cloudflare-bridge"
+version = "0.1.0"
+edition = "2021"
+authors = ["Saltuk Alakus <saltukalakus@gmail.com>"]
+description = "A secure bridge between stdio-based ACP agents and mobile apps via Cloudflare Zero Trust"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+tokio-tungstenite = "0.21"
+
+# HTTP client for Cloudflare API
+reqwest = { version = "0.11", features = ["json"] }
+
+# WebSocket support
+futures-util = "0.3"
+tungstenite = "0.21"
+
+# JSON serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# CLI argument parsing
+clap = { version = "4.4", features = ["derive"] }
+
+# QR code generation
+qrcode = "0.14"
+
+# Configuration management
+directories = "5.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Process management
+tokio-process = "0.2"
+
+# Base64 encoding for QR data
+base64 = "0.21"
+
+# Random number generation for tunnel secrets
+rand = "0.8"
+
+[dev-dependencies]
+mockito = "1.2"

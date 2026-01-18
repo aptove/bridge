@@ -1,0 +1,24 @@
+# Cloudflare Tunnel Configuration Example
+# 
+# This file should be created at: ~/.cloudflared/config.yml
+# After running `acp-bridge setup`, you'll need to manually configure this
+# to actually run the tunnel daemon.
+
+tunnel: YOUR_TUNNEL_ID_HERE
+credentials-file: /path/to/tunnel-credentials.json
+
+ingress:
+  - hostname: agent.yourdomain.com
+    service: http://localhost:8080
+  - service: http_status:404
+
+# Optional: Configure logging
+# loglevel: info
+# logfile: /var/log/cloudflared.log
+
+# Optional: Configure metrics
+# metrics: localhost:2000
+
+# Note: Get your tunnel ID and credentials from the Cloudflare dashboard
+# Or use: cloudflared tunnel list
+# And: cloudflared tunnel token YOUR_TUNNEL_ID
