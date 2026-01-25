@@ -8,11 +8,12 @@ const CLOUDFLARE_API_BASE: &str = "https://api.cloudflare.com/client/v4";
 /// Cloudflare API client for Zero Trust operations
 pub struct CloudflareClient {
     client: Client,
+    #[allow(dead_code)]
     api_token: String,
     account_id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Tunnel {
     pub id: String,
     pub name: String,
@@ -38,12 +39,14 @@ struct CloudflareResponse<T> {
     result: T,
     success: bool,
     errors: Vec<CloudflareError>,
+    #[allow(dead_code)]
     messages: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CloudflareError {
     code: i32,
+    #[allow(dead_code)]
     message: String,
 }
 

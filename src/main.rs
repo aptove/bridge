@@ -24,11 +24,11 @@ enum Commands {
     /// Set up Cloudflare Zero Trust infrastructure
     Setup {
         /// Your Cloudflare API token (with appropriate permissions)
-        #[arg(short, long, env = "CLOUDFLARE_API_TOKEN")]
+        #[arg(short, long)]
         api_token: String,
         
         /// Your Cloudflare account ID
-        #[arg(short = 'i', long, env = "CLOUDFLARE_ACCOUNT_ID")]
+        #[arg(short = 'i', long)]
         account_id: String,
         
         /// Your domain managed by Cloudflare
@@ -57,6 +57,10 @@ enum Commands {
         /// Show QR code for mobile connection
         #[arg(short, long)]
         qr: bool,
+        
+        /// Run in stdio-proxy mode (no Cloudflare). Exposes local WebSocket for mobile clients.
+        #[arg(long)]
+        stdio_proxy: bool,
     },
     
     /// Show connection QR code
@@ -128,7 +132,7 @@ async fn main() -> Result<()> {
             };
             
             config.save()?;
-            info!("✅ Configuration saved to: {}", config.config_path().display());
+            info!("✅ Configuration saved to: {}", BridgeConfig::config_path().display());
             
             // Display QR code
             println!("\n🎉 Setup complete!\n");
@@ -139,18 +143,51 @@ async fn main() -> Result<()> {
             println!("\n🚀 Start the bridge with: acp-bridge start --agent-command \"gemini --experimental-acp\"");
         }
         
-        Commands::Start { agent_command, port, qr } => {
+        Commands::Start { agent_command, port, qr, stdio_proxy } => {
             info!("🌉 Starting ACP Bridge...");
-            
-            let config = BridgeConfig::load()?;
-            
+            // If stdio_proxy is enabled, bypass Cloudflare and construct a local connection URL.
+            let config = if stdio_proxy {
+                // Determine a sensible local IP to advertise to mobile clients
+                // Try to detect local outbound IP; fall back to 127.0.0.1 on failure
+                let ip = {
+                    use std::net::UdpSocket;
+                    match UdpSocket::bind("0.0.0.0:0") {
+                        Ok(sock) => {
+                            if sock.connect("8.8.8.8:80").is_ok() {
+                                match sock.local_addr() {
+                                    Ok(addr) => addr.ip().to_string(),
+                                    Err(_) => "127.0.0.1".to_string(),
+                                }
+                            } else {
+                                "127.0.0.1".to_string()
+                            }
+                        }
+                        Err(_) => "127.0.0.1".to_string(),
+                    }
+                };
+
+                let hostname = format!("ws://{}:{}", ip, port);
+
+                BridgeConfig {
+                    hostname,
+                    tunnel_id: String::new(),
+                    tunnel_secret: String::new(),
+                    client_id: String::new(),
+                    client_secret: String::new(),
+                    domain: String::new(),
+                    subdomain: String::new(),
+                }
+            } else {
+                BridgeConfig::load()?
+            };
+
             if qr {
                 qr::display_qr_code(&config)?;
             }
-            
+
             info!("📡 Starting WebSocket server on port {}", port);
             info!("🤖 Agent command: {}", agent_command);
-            
+
             let bridge = StdioBridge::new(agent_command, port);
             bridge.start().await?;
         }
@@ -167,7 +204,7 @@ async fn main() -> Result<()> {
                     println!("Hostname: {}", config.hostname);
                     println!("Tunnel ID: {}", config.tunnel_id);
                     println!("Domain: {}.{}", config.subdomain, config.domain);
-                    println!("Config file: {}", config.config_path().display());
+                    println!("Config file: {}", BridgeConfig::config_path().display());
                 }
                 Err(e) => {
                     error!("❌ No configuration found: {}", e);

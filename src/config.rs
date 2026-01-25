@@ -53,15 +53,22 @@ impl BridgeConfig {
 
     /// Get connection info as JSON for QR code
     pub fn to_connection_json(&self) -> Result<String> {
-        let connection_info = serde_json::json!({
-            "url": self.hostname,
-            "clientId": self.client_id,
-            "clientSecret": self.client_secret,
-            "protocol": "acp",
-            "version": "1.0",
-        });
-        
-        serde_json::to_string(&connection_info)
+        use serde_json::{Map, Value};
+
+        let mut map = Map::new();
+        map.insert("url".to_string(), Value::String(self.hostname.clone()));
+        map.insert("protocol".to_string(), Value::String("acp".to_string()));
+        map.insert("version".to_string(), Value::String("1.0".to_string()));
+
+        if !self.client_id.is_empty() {
+            map.insert("clientId".to_string(), Value::String(self.client_id.clone()));
+        }
+
+        if !self.client_secret.is_empty() {
+            map.insert("clientSecret".to_string(), Value::String(self.client_secret.clone()));
+        }
+
+        serde_json::to_string(&Value::Object(map))
             .context("Failed to serialize connection info")
     }
 }

@@ -17,8 +17,12 @@ pub fn display_qr_code(config: &BridgeConfig) -> Result<()> {
     println!("\n{}", string);
     println!("\nConnection Details:");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("URL: {}", config.hostname);
-    println!("Client ID: {}...", &config.client_id[..20.min(config.client_id.len())]);
+        println!("URL: {}", config.hostname);
+        if config.client_id.is_empty() {
+            println!("Client ID: N/A (direct websocket)");
+        } else {
+            println!("Client ID: {}...", &config.client_id[..20.min(config.client_id.len())]);
+        }
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
     
     Ok(())

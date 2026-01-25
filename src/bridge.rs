@@ -3,7 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
 use tracing::{debug, error, info, warn};
