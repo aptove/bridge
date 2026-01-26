@@ -111,7 +111,8 @@ async fn handle_connection(stream: TcpStream, agent_command: String) -> Result<(
                 Ok(msg) => {
                     if msg.is_text() || msg.is_binary() {
                         let data = msg.into_data();
-                        debug!("📥 Received from WebSocket: {} bytes", data.len());
+                        info!("📥 Received from Mobile ({} bytes): {}", data.len(), 
+                            String::from_utf8_lossy(&data).chars().take(500).collect::<String>());
                         
                         if let Err(e) = stdin_writer.write_all(&data).await {
                             error!("Failed to write to agent stdin: {}", e);
@@ -127,6 +128,8 @@ async fn handle_connection(stream: TcpStream, agent_command: String) -> Result<(
                             error!("Failed to flush agent stdin: {}", e);
                             break;
                         }
+                        
+                        info!("✅ Forwarded to Copilot agent");
                     } else if msg.is_close() {
                         info!("📱 Client closed connection");
                         break;
@@ -149,7 +152,8 @@ async fn handle_connection(stream: TcpStream, agent_command: String) -> Result<(
         let mut lines = stdout_reader.lines();
         
         while let Ok(Some(line)) = lines.next_line().await {
-            debug!("📤 Sending to WebSocket: {} bytes", line.len());
+            info!("📤 Sending to Mobile ({} bytes): {}", line.len(), 
+                line.chars().take(500).collect::<String>());
             
             if let Err(e) = ws_sender.send(Message::Text(line)).await {
                 error!("Failed to send to WebSocket: {}", e);

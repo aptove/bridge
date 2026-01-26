@@ -61,6 +61,10 @@ enum Commands {
         /// Run in stdio-proxy mode (no Cloudflare). Exposes local WebSocket for mobile clients.
         #[arg(long)]
         stdio_proxy: bool,
+        
+        /// Enable verbose logging (shows info level logs)
+        #[arg(short, long)]
+        verbose: bool,
     },
     
     /// Show connection QR code
@@ -72,15 +76,28 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    // Determine log level based on command and flags
+    let log_level = match &cli.command {
+        Commands::Start { verbose, .. } => {
+            if *verbose {
+                "info"
+            } else {
+                "debug"
+            }
+        }
+        // For other commands, default to info
+        _ => "info"
+    };
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level))
         )
         .init();
-
-    let cli = Cli::parse();
 
     match cli.command {
         Commands::Setup {
@@ -143,7 +160,7 @@ async fn main() -> Result<()> {
             println!("\n🚀 Start the bridge with: acp-bridge start --agent-command \"gemini --experimental-acp\"");
         }
         
-        Commands::Start { agent_command, port, qr, stdio_proxy } => {
+        Commands::Start { agent_command, port, qr, stdio_proxy, verbose: _ } => {
             info!("🌉 Starting ACP Bridge...");
             // If stdio_proxy is enabled, bypass Cloudflare and construct a local connection URL.
             let config = if stdio_proxy {
