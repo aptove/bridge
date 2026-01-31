@@ -152,7 +152,7 @@ class ACPBridgeClient: NSObject, ObservableObject {
         
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: "acp-bridge-config",
+            kSecAttrAccount as String: "bridge-config",
             kSecValueData as String: data
         ]
         
@@ -169,7 +169,7 @@ class ACPBridgeClient: NSObject, ObservableObject {
     func loadFromKeychain() throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: "acp-bridge-config",
+            kSecAttrAccount as String: "bridge-config",
             kSecReturnData as String: true
         ]
         

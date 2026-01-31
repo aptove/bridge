@@ -22,10 +22,10 @@
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Build the bridge
-cd /path/to/acp-cloudflare-bridge
+cd /path/to/bridge
 cargo build --release
 
-# Binary location: target/release/acp-bridge
+# Binary location: target/release/bridge
 ```
 
 ## Usage
@@ -36,23 +36,23 @@ cargo build --release
 export CLOUDFLARE_API_TOKEN="your_api_token_here"
 export CLOUDFLARE_ACCOUNT_ID="your_account_id_here"
 
-./target/release/acp-bridge setup \
+./target/release/bridge setup \
   --domain "yourdomain.com" \
   --subdomain "agent"
 ```
 
-**Output**: QR code + config saved to `~/.config/acp-cloudflare-bridge/config.json`
+**Output**: QR code + config saved to `~/.config/bridge/config.json`
 
 ### Start the Bridge
 
 ```bash
 # For Gemini CLI
-./target/release/acp-bridge start \
+./target/release/bridge start \
   --agent-command "gemini --experimental-acp" \
   --qr
 
 # For Goose
-./target/release/acp-bridge start \
+./target/release/bridge start \
   --agent-command "goose" \
   --qr
 ```
@@ -60,13 +60,13 @@ export CLOUDFLARE_ACCOUNT_ID="your_account_id_here"
 ### Show QR Code Again
 
 ```bash
-./target/release/acp-bridge show-qr
+./target/release/bridge show-qr
 ```
 
 ### Check Status
 
 ```bash
-./target/release/acp-bridge status
+./target/release/bridge status
 ```
 
 ## Mobile App Integration
@@ -132,15 +132,15 @@ ws.resume()
 
 ## File Locations
 
-- **Config**: `~/.config/acp-cloudflare-bridge/config.json`
-- **Binary**: `target/release/acp-bridge`
+- **Config**: `~/.config/bridge/config.json`
+- **Binary**: `target/release/bridge`
 - **Logs**: stdout (use `tee` to save)
 
 ## Security Notes
 
 1. **Protect config.json**: Contains Service Token secret
    ```bash
-   chmod 600 ~/.config/acp-cloudflare-bridge/config.json
+   chmod 600 ~/.config/bridge/config.json
    ```
 
 2. **QR codes**: Treat as sensitive - they contain credentials

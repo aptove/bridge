@@ -61,7 +61,7 @@ I've created a comprehensive Rust CLI tool that bridges stdio-based ACP agents w
 ### Setup Flow (One-Time)
 
 ```bash
-acp-bridge setup \
+bridge setup \
   --api-token "your_token" \
   --account-id "your_id" \
   --domain "yourdomain.com"
@@ -72,13 +72,13 @@ This command:
 2. ✅ Creates DNS record `agent.yourdomain.com`
 3. ✅ Sets up Zero Trust Access Application
 4. ✅ Generates Service Token for mobile auth
-5. ✅ Saves config to `~/.config/acp-cloudflare-bridge/config.json`
+5. ✅ Saves config to `~/.config/bridge/config.json`
 6. ✅ Displays QR code
 
 ### Runtime Flow
 
 ```bash
-acp-bridge start --agent-command "gemini --experimental-acp"
+bridge start --agent-command "gemini --experimental-acp"
 ```
 
 This command:
@@ -168,7 +168,7 @@ Works perfectly on Cloudflare's free Zero Trust tier:
 
 3. **Run setup**:
    ```bash
-   ./target/release/acp-bridge setup \
+   ./target/release/bridge setup \
      --api-token "your_token" \
      --account-id "your_id" \
      --domain "yourdomain.com"
@@ -178,7 +178,7 @@ Works perfectly on Cloudflare's free Zero Trust tier:
 
 5. **Start bridge**:
    ```bash
-   ./target/release/acp-bridge start \
+   ./target/release/bridge start \
      --agent-command "gemini --experimental-acp"
    ```
 

@@ -1,7 +1,7 @@
 # Cloudflare Tunnel Configuration Example
 # 
 # This file should be created at: ~/.cloudflared/config.yml
-# After running `acp-bridge setup`, you'll need to manually configure this
+# After running `bridge setup`, you'll need to manually configure this
 # to actually run the tunnel daemon.
 
 tunnel: YOUR_TUNNEL_ID_HERE

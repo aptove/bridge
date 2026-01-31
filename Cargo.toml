@@ -1,5 +1,5 @@
 [package]
-name = "acp-cloudflare-bridge"
+name = "bridge"
 version = "0.1.0"
 edition = "2021"
 authors = ["Saltuk Alakus <saltukalakus@gmail.com>"]

@@ -12,7 +12,7 @@ use crate::bridge::StdioBridge;
 use crate::config::BridgeConfig;
 
 #[derive(Parser)]
-#[command(name = "acp-bridge")]
+#[command(name = "bridge")]
 #[command(about = "Bridge stdio-based ACP agents to mobile apps via Cloudflare Zero Trust", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -40,7 +40,7 @@ enum Commands {
         subdomain: String,
         
         /// Tunnel name
-        #[arg(short, long, default_value = "mobile-acp-bridge")]
+        #[arg(short, long, default_value = "aptove-tunnel")]
         tunnel_name: String,
     },
     
@@ -157,7 +157,7 @@ async fn main() -> Result<()> {
             
             println!("\n📱 Scan this QR code with your mobile app to connect.");
             println!("\n⚠️  Important: Keep your configuration file secure. It contains sensitive credentials.");
-            println!("\n🚀 Start the bridge with: acp-bridge start --agent-command \"gemini --experimental-acp\"");
+            println!("\n🚀 Start the bridge with: bridge start --agent-command \"gemini --experimental-acp\"");
         }
         
         Commands::Start { agent_command, port, qr, stdio_proxy, verbose: _ } => {
@@ -225,7 +225,7 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => {
                     error!("❌ No configuration found: {}", e);
-                    println!("\n💡 Run 'acp-bridge setup' to initialize the bridge.");
+                    println!("\n💡 Run 'bridge setup' to initialize the bridge.");
                 }
             }
         }

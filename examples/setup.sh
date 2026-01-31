@@ -15,4 +15,4 @@ cargo run --release -- start \
 
 # 3. In another terminal, start the Cloudflare tunnel daemon
 # (This connects your local bridge to Cloudflare's network)
-cloudflared tunnel --config ~/.cloudflared/config.yml run mobile-acp-bridge
+cloudflared tunnel --config ~/.cloudflared/config.yml run aptove-bridge

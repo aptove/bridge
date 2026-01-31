@@ -18,7 +18,7 @@ pub struct BridgeConfig {
 impl BridgeConfig {
     /// Get the default configuration file path
     pub fn config_path() -> PathBuf {
-        let config_dir = directories::ProjectDirs::from("com", "acp-bridge", "acp-cloudflare-bridge")
+        let config_dir = directories::ProjectDirs::from("com", "bridge", "bridge")
             .expect("Failed to determine config directory");
         
         let config_dir_path = config_dir.config_dir();

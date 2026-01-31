@@ -65,7 +65,7 @@ Even on the free tier, you must:
 
 ## Q3: Can the CLI tool setup Cloudflare Zero Trust?
 
-**Yes, completely!** The `acp-bridge setup` command automates everything.
+**Yes, completely!** The `bridge setup` command automates everything.
 
 ### What Gets Automated
 
@@ -109,7 +109,7 @@ Configures how traffic is routed to your local bridge.
 
 Just one command:
 ```bash
-acp-bridge setup \
+bridge setup \
   --api-token "your_token" \
   --account-id "your_account_id" \
   --domain "yourdomain.com" \
@@ -226,9 +226,9 @@ acp-bridge setup \
 3. **Enable Zero Trust**: Add payment method (won't be charged)
 4. **Create API Token**: With the 4 permissions listed above
 5. **Build the CLI**: `cargo build --release`
-6. **Run Setup**: `acp-bridge setup ...`
+6. **Run Setup**: `bridge setup ...`
 7. **Scan QR**: From your mobile app
-8. **Start Bridge**: `acp-bridge start ...`
+8. **Start Bridge**: `bridge start ...`
 9. **Connect**: Mobile → Cloudflare → Bridge → Agent
 
 **Total cost**: Domain only (~$10/year). Everything else is free! 🎉
