@@ -1,252 +1,185 @@
-# ACP Cloudflare Bridge
+# ACP Bridge
 
-A secure bridge between stdio-based Agent Client Protocol (ACP) agents and mobile applications via Cloudflare Zero Trust.
+A local bridge between stdio-based Agent Client Protocol (ACP) agents and mobile applications via WebSocket.
 
 ## Features
 
-- 🔐 **Automated Zero Trust Setup**: Programmatically creates tunnels, DNS records, and Access policies
-- 📱 **QR Code Authentication**: Mobile apps scan a QR code to connect - no manual configuration
-- 🌐 **Global Access**: Connect to your local AI agents from anywhere via Cloudflare's network
-- 🔒 **Service Token Auth**: Uses Cloudflare Access Service Tokens for secure, credential-based authentication
+- 📱 **QR Code Connection**: Mobile apps scan a QR code to connect to your local agent
 - ⚡ **WebSocket Streaming**: Real-time bidirectional communication between mobile and agent
 - 🦀 **Rust Performance**: Low-latency, high-throughput bridge implementation
+- 🔌 **STDIO Proxy**: Bridges WebSocket connections to stdio-based ACP agents
 
 ## Architecture
 
 ```
-┌─────────────┐        ┌──────────────────┐        ┌─────────────┐        ┌──────────────┐
-│   iPhone    │◄──────►│  Cloudflare      │◄──────►│   Bridge    │◄──────►│  ACP Agent   │
-│   Swift     │  WSS   │  Zero Trust      │  HTTP  │  (Rust)     │  stdio │  (Gemini)    │
-│   App       │        │  Tunnel          │        │  WebSocket  │        │              │
-└─────────────┘        └──────────────────┘        └─────────────┘        └──────────────┘
-     ▲                                                     │
-     │                                                     │
-     └─────────────── QR Code Scan ──────────────────────┘
-              (hostname + Service Token)
+┌─────────────┐                    ┌─────────────┐        ┌──────────────┐
+│   iPhone    │◄──────────────────►│   Bridge    │◄──────►│  ACP Agent   │
+│   App       │  WebSocket (LAN)   │   (Rust)    │  stdio │  (Copilot)   │
+└─────────────┘                    └─────────────┘        └──────────────┘
+     ▲                                     │
+     │                                     │
+     └─────────── QR Code Scan ───────────┘
+              (local IP + port)
 ```
 
 ## Prerequisites
 
-### Cloudflare Requirements
-
-1. **Free Cloudflare Account** with:
-   - A domain added and using Cloudflare nameservers
-   - Zero Trust enabled (requires adding a payment method for verification, but free tier is sufficient)
-
-2. **API Token** with these permissions:
-   - **Cloudflare One** → Connectors → Edit
-   - **Access** → Apps and Policies → Edit
-   - **Access** → Service Tokens → Edit
-   - **DNS** → Zone → Edit
-
-3. **Account ID**: Found in your Cloudflare dashboard URL or in the domain overview
-
-### Local Requirements
-
 - Rust 1.70+ (install via [rustup](https://rustup.rs/))
-- An ACP-compatible agent (e.g., Gemini CLI with `--experimental-acp` flag)
+- An ACP-compatible agent (e.g., GitHub Copilot with `--acp` flag)
+- Mobile device on the same local network as your computer
 
 ## Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/acp-cloudflare-bridge.git
-cd acp-cloudflare-bridge
+git clone https://github.com/aptove/bridge.git
+cd bridge
 
 # Build the tool
 cargo build --release
 
-# Install to PATH
-cargo install --path .
+# The binary is at target/release/acp-cloudflare-bridge
 ```
 
 ## Quick Start
 
-### Step 1: Setup Cloudflare Infrastructure
+### Step 1: Find Your Local IP
 
-Run the setup command with your Cloudflare credentials:
+The bridge needs to know your local IP address for the QR code:
 
 ```bash
-acp-bridge setup \
-  --api-token "your_cloudflare_api_token" \
-  --account-id "your_account_id" \
-  --domain "yourdomain.com" \
-  --subdomain "agent"
+# macOS
+ifconfig | grep "inet " | grep -v 127.0.0.1
+
+# Linux
+ip addr show | grep "inet " | grep -v 127.0.0.1
 ```
 
-This will:
-- ✅ Create a Cloudflare Tunnel named "mobile-acp-bridge"
-- ✅ Create DNS record `agent.yourdomain.com` → tunnel
-- ✅ Create Zero Trust Access Application with Service Auth policy
-- ✅ Generate Service Token for mobile authentication
-- ✅ Save configuration to `~/.config/acp-cloudflare-bridge/config.json`
-- ✅ Display a QR code for mobile connection
-
-**Important**: The QR code contains your Service Token secret. Keep it secure!
+Note your local IP (e.g., `192.168.1.100`).
 
 ### Step 2: Start the Bridge
 
 Start the bridge with your ACP agent command:
 
 ```bash
-# For Gemini CLI
-acp-bridge start --agent-command "gemini --experimental-acp" --qr
+# For GitHub Copilot
+./target/release/acp-cloudflare-bridge start \
+  --agent-command "copilot --acp" \
+  --port 8080 \
+  --stdio-proxy
 
-# For other agents
-acp-bridge start --agent-command "your-agent-command" --qr
+# For Gemini CLI
+./target/release/acp-cloudflare-bridge start \
+  --agent-command "gemini --experimental-acp" \
+  --port 8080 \
+  --stdio-proxy
 ```
 
-The `--qr` flag displays the connection QR code again.
+The bridge will:
+- Start a WebSocket server on port 8080
+- Spawn the ACP agent process
+- Display a QR code for mobile connection
 
 ### Step 3: Connect Your Mobile App
 
-In your Swift app, scan the QR code. The bridge will provide a JSON payload:
+1. **Ensure same network**: Your phone must be on the same Wi-Fi network as your computer
+2. **Open the Aptove app** on your iOS device
+3. **Scan the QR code** displayed by the bridge
+4. **Start chatting** with your local AI agent!
+
+## Connection URL Format
+
+The QR code contains a JSON payload:
 
 ```json
 {
-  "url": "https://agent.yourdomain.com",
-  "clientId": "xxxxx.access",
-  "clientSecret": "xxxxxxxxxxxxxx",
+  "url": "ws://192.168.1.100:8080",
   "protocol": "acp",
   "version": "1.0"
 }
 ```
 
-Your Swift app should:
+Your mobile app connects via plain WebSocket to the local IP and port.
 
-1. **Parse the QR code** and extract credentials
-2. **Store in Keychain** for persistent authentication
-3. **Connect via WebSocket** with Cloudflare Access headers:
-
-```swift
-var request = URLRequest(url: URL(string: "wss://agent.yourdomain.com")!)
-request.addValue(clientID, forHTTPHeaderField: "CF-Access-Client-Id")
-request.addValue(clientSecret, forHTTPHeaderField: "CF-Access-Client-Secret")
-
-let webSocketTask = URLSession.shared.webSocketTask(with: request)
-webSocketTask.resume()
-```
-
-## Commands
-
-### `setup`
-
-Create or update Cloudflare Zero Trust infrastructure:
-
-```bash
-acp-bridge setup \
-  --api-token <TOKEN> \
-  --account-id <ID> \
-  --domain <DOMAIN> \
-  --subdomain <SUBDOMAIN> \
-  --tunnel-name <NAME>
-```
-
-**Options:**
-- `--api-token`: Cloudflare API token (or set `CLOUDFLARE_API_TOKEN` env var)
-- `--account-id`: Cloudflare account ID (or set `CLOUDFLARE_ACCOUNT_ID` env var)
-- `--domain`: Your domain managed by Cloudflare
-- `--subdomain`: Subdomain for the bridge (default: `agent`)
-- `--tunnel-name`: Tunnel name (default: `mobile-acp-bridge`)
+## Command Options
 
 ### `start`
 
 Start the WebSocket bridge server:
 
 ```bash
-acp-bridge start \
-  --agent-command <COMMAND> \
-  --port <PORT> \
-  --qr
+acp-cloudflare-bridge start [OPTIONS]
 ```
 
 **Options:**
-- `--agent-command`: Command to spawn the ACP agent (e.g., `"gemini --experimental-acp"`)
-- `--port`: Local WebSocket port (default: `8080`)
-- `--qr`: Display QR code on startup
 
-### `show-qr`
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--agent-command <CMD>` | Command to spawn the ACP agent | Required |
+| `--port <PORT>` | Local WebSocket port | `8080` |
+| `--stdio-proxy` | Enable stdio proxy mode | Required for local use |
+| `--host <HOST>` | Host to bind to | `0.0.0.0` |
 
-Display the connection QR code:
-
-```bash
-acp-bridge show-qr
-```
-
-### `status`
-
-Check configuration status:
+### Examples
 
 ```bash
-acp-bridge status
+# GitHub Copilot
+./target/release/acp-cloudflare-bridge start \
+  --agent-command "copilot --acp" \
+  --port 8080 \
+  --stdio-proxy
+
+# Custom agent with arguments
+./target/release/acp-cloudflare-bridge start \
+  --agent-command "/path/to/my-agent --verbose" \
+  --port 9000 \
+  --stdio-proxy
 ```
-
-## Security Considerations
-
-### Service Token Lifecycle
-
-- **Generation**: Service Tokens are generated during `setup` and stored locally
-- **Duration**: Tokens are valid for 1 year by default
-- **Rotation**: To rotate tokens, run `setup` again (old tokens remain valid)
-- **Revocation**: Delete tokens via the Cloudflare Dashboard → Zero Trust → Settings → Service Authentication
-
-### Best Practices
-
-1. **Secure Storage**: The config file contains sensitive credentials. Use appropriate file permissions:
-   ```bash
-   chmod 600 ~/.config/acp-cloudflare-bridge/config.json
-   ```
-
-2. **One-Time QR**: For production, consider implementing QR expiration (show once, then require re-authentication)
-
-3. **Network Isolation**: The bridge binds to `0.0.0.0` by default. For additional security, bind to `127.0.0.1` if your tunnel runs on the same machine
-
-4. **Mobile Keychain**: Always store Service Tokens in the iOS/Android Keychain, never in UserDefaults or plain files
-
-## Limitations on Free Tier
-
-| Feature | Free Tier Limit | Notes |
-|---------|-----------------|-------|
-| Users | 50 seats | More than enough for personal use |
-| Tunnels | Unlimited | Named tunnels only |
-| Subdomain Levels | 1 level | Use `agent.domain.com`, not `my.agent.domain.com` |
-| Log Retention | 24 hours | Sufficient for debugging |
-| SSL Certificate | Universal SSL | Covers single-level subdomains |
 
 ## Troubleshooting
 
-### "Zone not found"
+### Mobile app can't connect
 
-Ensure your domain is added to Cloudflare and uses Cloudflare nameservers. Check with:
-
-```bash
-dig NS yourdomain.com
-```
-
-You should see Cloudflare nameservers (e.g., `*.ns.cloudflare.com`).
-
-### "Failed to create tunnel"
-
-Verify:
-1. Zero Trust is enabled (Cloudflare Dashboard → Zero Trust)
-2. Payment method is added (required for verification, even on free tier)
-3. API token has correct permissions
-
-### Mobile app receives 403 Forbidden
-
-Check:
-1. Service Token headers are included in WebSocket request
-2. Access Application policy includes "Service Auth"
-3. Token hasn't been revoked in Cloudflare Dashboard
+1. **Check network**: Ensure phone and computer are on the same Wi-Fi
+2. **Check firewall**: Allow incoming connections on port 8080
+   ```bash
+   # macOS - temporarily disable firewall or add exception
+   # Check System Preferences → Security & Privacy → Firewall
+   ```
+3. **Verify IP**: Make sure the QR code contains your current local IP
+4. **Test locally**: Try connecting from your computer first:
+   ```bash
+   websocat ws://localhost:8080
+   ```
 
 ### Agent process fails to start
 
 Test your agent command manually:
+
 ```bash
+# Test Copilot
+copilot --acp
+
+# Test Gemini
 gemini --experimental-acp
 ```
 
-Ensure it accepts stdin and produces stdout (JSON-RPC format).
+Ensure the agent accepts stdin and produces stdout in JSON-RPC format.
+
+### Connection drops frequently
+
+- Check your Wi-Fi stability
+- Try moving closer to your router
+- Ensure no VPN is interfering with local network traffic
+
+## Security Considerations
+
+⚠️ **Local Network Only**: This bridge is designed for local development and personal use. The WebSocket connection is **not encrypted** (ws://, not wss://).
+
+**Best practices:**
+- Only use on trusted networks (your home Wi-Fi)
+- Don't expose the bridge port to the internet
+- Stop the bridge when not in use
 
 ## Development
 
@@ -255,10 +188,16 @@ Ensure it accepts stdin and produces stdout (JSON-RPC format).
 ```
 src/
 ├── main.rs           # CLI entry point and command routing
-├── cloudflare.rs     # Cloudflare API client
 ├── bridge.rs         # WebSocket ↔ stdio bridge
 ├── config.rs         # Configuration management
 └── qr.rs            # QR code generation
+```
+
+### Building for Release
+
+```bash
+cargo build --release
+# Binary: target/release/acp-cloudflare-bridge
 ```
 
 ### Running Tests
@@ -267,38 +206,16 @@ src/
 cargo test
 ```
 
-### Building for Release
-
-```bash
-cargo build --release
-# Binary: target/release/acp-bridge
-```
-
-## Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Submit a pull request
-
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details
-
-## Acknowledgments
-
-- Built for the [Agent Client Protocol (ACP)](https://github.com/google/acp) ecosystem
-- Inspired by the Language Server Protocol (LSP) design
-- Uses Cloudflare's excellent Zero Trust platform
+Apache 2.0 License - see [LICENSE](LICENSE) for details
 
 ## Related Projects
 
-- [Gemini CLI](https://github.com/google/gemini-cli) - Official ACP reference implementation
-- [Goose](https://github.com/block/goose) - Another ACP-compatible agent
-- Your Swift ACP client library (coming soon!)
+- [ACP Swift SDK](https://github.com/aptove/swift-sdk) - Swift SDK for ACP clients
+- [Gemini CLI](https://github.com/google/gemini-cli) - Google's ACP agent
+- [GitHub Copilot](https://github.com/features/copilot) - GitHub's AI assistant with ACP support
 
 ---
 
-**Questions or Issues?** Open an issue on GitHub or contact [@yourusername](https://github.com/yourusername)
+**Questions or Issues?** Open an issue on GitHub
