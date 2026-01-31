@@ -2,6 +2,8 @@
 
 A local bridge between stdio-based Agent Client Protocol (ACP) agents and mobile applications via WebSocket.
 
+> **Note:** This bridge also includes experimental Cloudflare Zero Trust integration for remote access. The Cloudflare implementation is experimental and may have issues. For reliable usage, we recommend the local WebSocket mode documented below.
+
 ## Features
 
 - 📱 **QR Code Connection**: Mobile apps scan a QR code to connect to your local agent
