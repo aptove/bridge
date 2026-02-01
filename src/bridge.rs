@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use std::process::Stdio;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::net::TcpListener;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response, ErrorResponse};
@@ -12,6 +12,7 @@ use tokio_tungstenite::tungstenite::http::StatusCode;
 use tracing::{debug, error, info, warn};
 
 use crate::rate_limiter::RateLimiter;
+use crate::tls::TlsConfig;
 
 /// Bridge between stdio-based ACP agents and WebSocket clients
 pub struct StdioBridge {
@@ -20,6 +21,7 @@ pub struct StdioBridge {
     bind_addr: String,
     auth_token: Option<String>,
     rate_limiter: Arc<RateLimiter>,
+    tls_config: Option<Arc<TlsConfig>>,
 }
 
 impl StdioBridge {
@@ -30,6 +32,7 @@ impl StdioBridge {
             bind_addr: "0.0.0.0".to_string(),
             auth_token: None,
             rate_limiter: Arc::new(RateLimiter::new(3, 10)),
+            tls_config: None,
         }
     }
 
@@ -51,6 +54,12 @@ impl StdioBridge {
         self
     }
 
+    /// Enable TLS with the given configuration
+    pub fn with_tls(mut self, tls_config: TlsConfig) -> Self {
+        self.tls_config = Some(Arc::new(tls_config));
+        self
+    }
+
     /// Start the bridge server
     pub async fn start(&self) -> Result<()> {
         let addr = format!("{}:{}", self.bind_addr, self.port);
@@ -58,7 +67,15 @@ impl StdioBridge {
             .await
             .context(format!("Failed to bind to {}", addr))?;
 
-        info!("✅ WebSocket server listening on {}", addr);
+        let protocol = if self.tls_config.is_some() { "wss" } else { "ws" };
+        info!("✅ WebSocket server listening on {} ({}://{})", addr, protocol, addr);
+        
+        if self.tls_config.is_some() {
+            info!("🔒 TLS enabled");
+        } else {
+            warn!("⚠️  TLS disabled - connections are not encrypted!");
+        }
+        
         if self.auth_token.is_some() {
             info!("🔐 Authentication required for connections");
         } else {
@@ -68,6 +85,7 @@ impl StdioBridge {
 
         let auth_token = Arc::new(self.auth_token.clone());
         let rate_limiter = Arc::clone(&self.rate_limiter);
+        let tls_config = self.tls_config.clone();
 
         loop {
             match listener.accept().await {
@@ -86,12 +104,27 @@ impl StdioBridge {
                     let agent_command = self.agent_command.clone();
                     let auth_token = Arc::clone(&auth_token);
                     let rate_limiter = Arc::clone(&rate_limiter);
+                    let tls_config = tls_config.clone();
                     
                     tokio::spawn(async move {
                         // Register connection
                         rate_limiter.add_connection(client_ip).await;
                         
-                        let result = handle_connection(stream, agent_command, auth_token).await;
+                        let result = if let Some(tls) = tls_config {
+                            // TLS connection
+                            match tls.acceptor.accept(stream).await {
+                                Ok(tls_stream) => {
+                                    handle_connection_generic(tls_stream, agent_command, auth_token).await
+                                }
+                                Err(e) => {
+                                    warn!("🚫 TLS handshake failed: {}", e);
+                                    Err(anyhow::anyhow!("TLS handshake failed: {}", e))
+                                }
+                            }
+                        } else {
+                            // Plain TCP connection
+                            handle_connection_generic(stream, agent_command, auth_token).await
+                        };
                         
                         // Always remove connection when done
                         rate_limiter.remove_connection(client_ip).await;
@@ -109,8 +142,11 @@ impl StdioBridge {
     }
 }
 
-/// Handle a single WebSocket connection
-async fn handle_connection(stream: TcpStream, agent_command: String, auth_token: Arc<Option<String>>) -> Result<()> {
+/// Handle a single WebSocket connection (generic over stream type for TLS/non-TLS)
+async fn handle_connection_generic<S>(stream: S, agent_command: String, auth_token: Arc<Option<String>>) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     // Custom callback to validate auth token during WebSocket handshake
     let auth_token_for_callback = Arc::clone(&auth_token);
     let callback = move |req: &Request, response: Response| -> std::result::Result<Response, ErrorResponse> {

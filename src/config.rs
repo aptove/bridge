@@ -16,18 +16,26 @@ pub struct BridgeConfig {
     /// Authentication token for WebSocket connections (generated on first run)
     #[serde(default)]
     pub auth_token: String,
+    /// TLS certificate fingerprint (SHA256, hex encoded with colons)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_fingerprint: Option<String>,
 }
 
 impl BridgeConfig {
     /// Get the default configuration file path
     pub fn config_path() -> PathBuf {
+        Self::config_dir().join("config.json")
+    }
+    
+    /// Get the configuration directory path
+    pub fn config_dir() -> PathBuf {
         let config_dir = directories::ProjectDirs::from("com", "bridge", "bridge")
             .expect("Failed to determine config directory");
         
-        let config_dir_path = config_dir.config_dir();
-        fs::create_dir_all(config_dir_path).ok();
+        let config_dir_path = config_dir.config_dir().to_path_buf();
+        fs::create_dir_all(&config_dir_path).ok();
         
-        config_dir_path.join("config.json")
+        config_dir_path
     }
 
     /// Save configuration to disk with secure permissions
@@ -97,6 +105,11 @@ impl BridgeConfig {
         // Include auth token for WebSocket authentication
         if !self.auth_token.is_empty() {
             map.insert("authToken".to_string(), Value::String(self.auth_token.clone()));
+        }
+        
+        // Include TLS certificate fingerprint for pinning
+        if let Some(ref fingerprint) = self.cert_fingerprint {
+            map.insert("certFingerprint".to_string(), Value::String(fingerprint.clone()));
         }
 
         serde_json::to_string(&Value::Object(map))

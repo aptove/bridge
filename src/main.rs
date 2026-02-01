@@ -7,10 +7,12 @@ mod bridge;
 mod config;
 mod qr;
 mod rate_limiter;
+mod tls;
 
 use crate::cloudflare::CloudflareClient;
 use crate::bridge::StdioBridge;
 use crate::config::BridgeConfig;
+use crate::tls::TlsConfig;
 
 #[derive(Parser)]
 #[command(name = "bridge")]
@@ -70,6 +72,10 @@ enum Commands {
         /// Disable authentication (NOT RECOMMENDED - use only for development)
         #[arg(long)]
         no_auth: bool,
+        
+        /// Disable TLS encryption (NOT RECOMMENDED - use only for development)
+        #[arg(long)]
+        no_tls: bool,
         
         /// Maximum concurrent connections per IP address (default: 3)
         #[arg(long, default_value = "3")]
@@ -164,6 +170,7 @@ async fn main() -> Result<()> {
                 domain,
                 subdomain,
                 auth_token: String::new(),
+                cert_fingerprint: None,
             };
             
             // Generate auth token for secure connections
@@ -181,14 +188,29 @@ async fn main() -> Result<()> {
             println!("\n🚀 Start the bridge with: bridge start --agent-command \"gemini --experimental-acp\"");
         }
         
-        Commands::Start { agent_command, port, bind, qr, stdio_proxy, no_auth, max_connections_per_ip, max_attempts_per_minute, verbose: _ } => {
+        Commands::Start { agent_command, port, bind, qr, stdio_proxy, no_auth, no_tls, max_connections_per_ip, max_attempts_per_minute, verbose: _ } => {
             info!("🌉 Starting ACP Bridge...");
             
             if no_auth {
                 warn!("⚠️  Authentication disabled with --no-auth flag. This is NOT recommended for production!");
             }
             
+            if no_tls {
+                warn!("⚠️  TLS disabled with --no-tls flag. Connections will not be encrypted!");
+            }
+            
             // If stdio_proxy is enabled, bypass Cloudflare and construct a local connection URL.
+            // Determine the config directory for TLS certs
+            let config_dir = BridgeConfig::config_dir();
+            std::fs::create_dir_all(&config_dir)?;
+            
+            // Load or generate TLS config (unless --no-tls)
+            let tls_config = if no_tls {
+                None
+            } else {
+                Some(TlsConfig::load_or_generate(&config_dir)?)
+            };
+            
             let config = if stdio_proxy {
                 // Determine a sensible local IP to advertise to mobile clients
                 // Use local-ip-address crate to avoid external network connections
@@ -201,7 +223,8 @@ async fn main() -> Result<()> {
                     bind.clone()
                 };
 
-                let hostname = format!("ws://{}:{}", ip, port);
+                let protocol = if tls_config.is_some() { "wss" } else { "ws" };
+                let hostname = format!("{}://{}:{}", protocol, ip, port);
 
                 let mut cfg = BridgeConfig {
                     hostname,
@@ -212,6 +235,7 @@ async fn main() -> Result<()> {
                     domain: String::new(),
                     subdomain: String::new(),
                     auth_token: String::new(),
+                    cert_fingerprint: tls_config.as_ref().map(|t| t.fingerprint.clone()),
                 };
                 
                 // Generate and persist auth token for stdio-proxy mode
@@ -240,10 +264,17 @@ async fn main() -> Result<()> {
 
             let auth_token = if no_auth { None } else { Some(config.auth_token.clone()) };
             
-            let bridge = StdioBridge::new(agent_command, port)
+            let mut bridge = StdioBridge::new(agent_command, port)
                 .with_bind_addr(bind)
                 .with_auth_token(auth_token)
                 .with_rate_limits(max_connections_per_ip, max_attempts_per_minute);
+            
+            // Add TLS if enabled
+            if let Some(tls) = tls_config {
+                info!("🔒 TLS fingerprint: {}", tls.fingerprint_short());
+                bridge = bridge.with_tls(tls);
+            }
+            
             bridge.start().await?;
         }
         

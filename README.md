@@ -98,11 +98,12 @@ The QR code contains a JSON payload:
   "url": "ws://192.168.1.100:8080",
   "protocol": "acp",
   "version": "1.0",
-  "authToken": "abc123..."
+  "authToken": "abc123...",
+  "certFingerprint": "AB:CD:EF:12:34:..."
 }
 ```
 
-Your mobile app connects via WebSocket to the local IP and port, providing the auth token for authentication.
+Your mobile app connects via WebSocket to the local IP and port, providing the auth token for authentication. The certificate fingerprint is used to validate the self-signed TLS certificate.
 
 ## Command Options
 
@@ -124,6 +125,7 @@ bridge start [OPTIONS]
 | `--stdio-proxy` | Enable stdio proxy mode (bypasses Cloudflare) | Required for local use |
 | `--qr` | Display QR code for mobile connection | Off |
 | `--no-auth` | Disable authentication (NOT recommended) | Auth enabled |
+| `--no-tls` | Disable TLS encryption (NOT recommended) | TLS enabled |
 | `--max-connections-per-ip <N>` | Maximum concurrent connections per IP | `3` |
 | `--max-attempts-per-minute <N>` | Maximum connection attempts per minute per IP | `10` |
 | `--verbose` | Enable verbose logging | Off |
@@ -131,7 +133,7 @@ bridge start [OPTIONS]
 ### Examples
 
 ```bash
-# GitHub Copilot with QR code
+# GitHub Copilot with QR code (TLS enabled by default)
 ./target/release/bridge start \
   --agent-command "copilot --acp" \
   --port 8080 \
@@ -144,6 +146,13 @@ bridge start [OPTIONS]
   --bind 127.0.0.1 \
   --port 8080 \
   --stdio-proxy
+
+# Development mode without TLS (NOT recommended)
+./target/release/bridge start \
+  --agent-command "copilot --acp" \
+  --port 8080 \
+  --stdio-proxy \
+  --no-tls
 
 # Custom agent with arguments
 ./target/release/bridge start \
@@ -190,6 +199,19 @@ Ensure the agent accepts stdin and produces stdout in JSON-RPC format.
 
 ## Security
 
+### TLS Encryption
+
+The bridge automatically generates a self-signed TLS certificate on first run:
+- Certificate and key are stored in the config directory with restricted permissions (0600)
+- The certificate fingerprint (SHA256) is included in the QR code
+- Mobile apps validate the certificate fingerprint to prevent MITM attacks
+- Valid for 1 year, includes SANs for localhost and your local network IP
+
+**To disable TLS** (not recommended):
+```bash
+./target/release/bridge start --agent-command "copilot --acp" --stdio-proxy --no-tls
+```
+
 ### Authentication
 
 The bridge generates a unique authentication token on first run. This token:
@@ -223,11 +245,16 @@ Connections exceeding these limits are automatically rejected.
 
 ### Config File Location
 
-Configuration and auth token are stored at:
-- **macOS**: `~/Library/Application Support/com.bridge.bridge/config.json`
-- **Linux**: `~/.config/bridge/config.json`
+Configuration, auth token, and TLS certificates are stored at:
+- **macOS**: `~/Library/Application Support/com.bridge.bridge/`
+- **Linux**: `~/.config/bridge/`
 
-The config file is created with restrictive permissions (0600) to protect the auth token.
+Files:
+- `config.json` - Configuration and auth token
+- `cert.pem` - TLS certificate
+- `key.pem` - TLS private key
+
+All files are created with restrictive permissions (0600) to protect sensitive data.
 
 ## Development
 
