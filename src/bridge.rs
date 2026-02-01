@@ -11,12 +11,15 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::tungstenite::http::StatusCode;
 use tracing::{debug, error, info, warn};
 
+use crate::rate_limiter::RateLimiter;
+
 /// Bridge between stdio-based ACP agents and WebSocket clients
 pub struct StdioBridge {
     agent_command: String,
     port: u16,
     bind_addr: String,
     auth_token: Option<String>,
+    rate_limiter: Arc<RateLimiter>,
 }
 
 impl StdioBridge {
@@ -26,6 +29,7 @@ impl StdioBridge {
             port,
             bind_addr: "0.0.0.0".to_string(),
             auth_token: None,
+            rate_limiter: Arc::new(RateLimiter::new(3, 10)),
         }
     }
 
@@ -38,6 +42,12 @@ impl StdioBridge {
     /// Set the required authentication token
     pub fn with_auth_token(mut self, token: Option<String>) -> Self {
         self.auth_token = token;
+        self
+    }
+
+    /// Set the rate limiter configuration
+    pub fn with_rate_limits(mut self, max_connections_per_ip: usize, max_attempts_per_minute: usize) -> Self {
+        self.rate_limiter = Arc::new(RateLimiter::new(max_connections_per_ip, max_attempts_per_minute));
         self
     }
 
@@ -57,16 +67,36 @@ impl StdioBridge {
         info!("🤖 Ready to accept mobile connections...");
 
         let auth_token = Arc::new(self.auth_token.clone());
+        let rate_limiter = Arc::clone(&self.rate_limiter);
 
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
+                    // Extract IP for rate limiting
+                    let client_ip = addr.ip();
+                    
+                    // Check rate limits before processing
+                    if let Err(e) = rate_limiter.check_connection(client_ip).await {
+                        warn!("🚫 Rate limit exceeded for {}: {}", client_ip, e);
+                        // Connection will be dropped, client should retry later
+                        continue;
+                    }
+                    
                     info!("📱 New connection from: {}", addr);
                     let agent_command = self.agent_command.clone();
                     let auth_token = Arc::clone(&auth_token);
+                    let rate_limiter = Arc::clone(&rate_limiter);
                     
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, agent_command, auth_token).await {
+                        // Register connection
+                        rate_limiter.add_connection(client_ip).await;
+                        
+                        let result = handle_connection(stream, agent_command, auth_token).await;
+                        
+                        // Always remove connection when done
+                        rate_limiter.remove_connection(client_ip).await;
+                        
+                        if let Err(e) = result {
                             error!("Connection error: {}", e);
                         }
                     });
@@ -183,8 +213,8 @@ async fn handle_connection(stream: TcpStream, agent_command: String, auth_token:
                 Ok(msg) => {
                     if msg.is_text() || msg.is_binary() {
                         let data = msg.into_data();
-                        info!("📥 Received from Mobile ({} bytes): {}", data.len(), 
-                            String::from_utf8_lossy(&data).chars().take(500).collect::<String>());
+                        debug!("📥 Received from Mobile ({} bytes): {}", data.len(), 
+                            String::from_utf8_lossy(&data).chars().take(200).collect::<String>());
                         
                         if let Err(e) = stdin_writer.write_all(&data).await {
                             error!("Failed to write to agent stdin: {}", e);
@@ -201,7 +231,7 @@ async fn handle_connection(stream: TcpStream, agent_command: String, auth_token:
                             break;
                         }
                         
-                        info!("✅ Forwarded to Copilot agent");
+                        debug!("✅ Forwarded to agent");
                     } else if msg.is_close() {
                         info!("📱 Client closed connection");
                         break;
@@ -224,8 +254,8 @@ async fn handle_connection(stream: TcpStream, agent_command: String, auth_token:
         let mut lines = stdout_reader.lines();
         
         while let Ok(Some(line)) = lines.next_line().await {
-            info!("📤 Sending to Mobile ({} bytes): {}", line.len(), 
-                line.chars().take(500).collect::<String>());
+            debug!("📤 Sending to Mobile ({} bytes): {}", line.len(), 
+                line.chars().take(200).collect::<String>());
             
             if let Err(e) = ws_sender.send(Message::Text(line)).await {
                 error!("Failed to send to WebSocket: {}", e);

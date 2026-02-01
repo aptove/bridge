@@ -124,6 +124,8 @@ bridge start [OPTIONS]
 | `--stdio-proxy` | Enable stdio proxy mode (bypasses Cloudflare) | Required for local use |
 | `--qr` | Display QR code for mobile connection | Off |
 | `--no-auth` | Disable authentication (NOT recommended) | Auth enabled |
+| `--max-connections-per-ip <N>` | Maximum concurrent connections per IP | `3` |
+| `--max-attempts-per-minute <N>` | Maximum connection attempts per minute per IP | `10` |
 | `--verbose` | Enable verbose logging | Off |
 
 ### Examples
@@ -210,6 +212,14 @@ The bridge generates a unique authentication token on first run. This token:
 - Don't expose the bridge port to the internet
 - Stop the bridge when not in use
 - Keep the auth token secret - anyone with it can execute commands via your agent
+
+### Rate Limiting
+
+The bridge includes built-in rate limiting to prevent abuse:
+- **Concurrent connections**: Max 3 connections per IP (configurable with `--max-connections-per-ip`)
+- **Connection attempts**: Max 10 attempts per minute per IP (configurable with `--max-attempts-per-minute`)
+
+Connections exceeding these limits are automatically rejected.
 
 ### Config File Location
 

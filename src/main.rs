@@ -6,6 +6,7 @@ mod cloudflare;
 mod bridge;
 mod config;
 mod qr;
+mod rate_limiter;
 
 use crate::cloudflare::CloudflareClient;
 use crate::bridge::StdioBridge;
@@ -70,6 +71,14 @@ enum Commands {
         #[arg(long)]
         no_auth: bool,
         
+        /// Maximum concurrent connections per IP address (default: 3)
+        #[arg(long, default_value = "3")]
+        max_connections_per_ip: usize,
+        
+        /// Maximum connection attempts per minute per IP address (default: 10)
+        #[arg(long, default_value = "10")]
+        max_attempts_per_minute: usize,
+        
         /// Enable verbose logging (shows info level logs)
         #[arg(short, long)]
         verbose: bool,
@@ -92,7 +101,7 @@ async fn main() -> Result<()> {
             if *verbose {
                 "info"
             } else {
-                "debug"
+                "warn"  // Default to warn - no message content logged
             }
         }
         // For other commands, default to info
@@ -172,7 +181,7 @@ async fn main() -> Result<()> {
             println!("\n🚀 Start the bridge with: bridge start --agent-command \"gemini --experimental-acp\"");
         }
         
-        Commands::Start { agent_command, port, bind, qr, stdio_proxy, no_auth, verbose: _ } => {
+        Commands::Start { agent_command, port, bind, qr, stdio_proxy, no_auth, max_connections_per_ip, max_attempts_per_minute, verbose: _ } => {
             info!("🌉 Starting ACP Bridge...");
             
             if no_auth {
@@ -182,20 +191,10 @@ async fn main() -> Result<()> {
             // If stdio_proxy is enabled, bypass Cloudflare and construct a local connection URL.
             let config = if stdio_proxy {
                 // Determine a sensible local IP to advertise to mobile clients
-                // Try to detect local outbound IP; fall back to 127.0.0.1 on failure
+                // Use local-ip-address crate to avoid external network connections
                 let ip = if bind == "0.0.0.0" {
-                    use std::net::UdpSocket;
-                    match UdpSocket::bind("0.0.0.0:0") {
-                        Ok(sock) => {
-                            if sock.connect("8.8.8.8:80").is_ok() {
-                                match sock.local_addr() {
-                                    Ok(addr) => addr.ip().to_string(),
-                                    Err(_) => "127.0.0.1".to_string(),
-                                }
-                            } else {
-                                "127.0.0.1".to_string()
-                            }
-                        }
+                    match local_ip_address::local_ip() {
+                        Ok(addr) => addr.to_string(),
                         Err(_) => "127.0.0.1".to_string(),
                     }
                 } else {
@@ -243,7 +242,8 @@ async fn main() -> Result<()> {
             
             let bridge = StdioBridge::new(agent_command, port)
                 .with_bind_addr(bind)
-                .with_auth_token(auth_token);
+                .with_auth_token(auth_token)
+                .with_rate_limits(max_connections_per_ip, max_attempts_per_minute);
             bridge.start().await?;
         }
         

@@ -47,5 +47,8 @@ base64 = "0.21"
 # Random number generation for tunnel secrets
 rand = "0.8"
 
+# Local network interface enumeration
+local-ip-address = "0.6"
+
 [dev-dependencies]
 mockito = "1.2"
