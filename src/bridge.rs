@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use std::process::Stdio;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -13,6 +13,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::rate_limiter::RateLimiter;
 use crate::tls::TlsConfig;
+use crate::pairing::{PairingManager, PairingError, PairingErrorResponse};
 
 /// Bridge between stdio-based ACP agents and WebSocket clients
 pub struct StdioBridge {
@@ -22,6 +23,7 @@ pub struct StdioBridge {
     auth_token: Option<String>,
     rate_limiter: Arc<RateLimiter>,
     tls_config: Option<Arc<TlsConfig>>,
+    pairing_manager: Option<Arc<PairingManager>>,
 }
 
 impl StdioBridge {
@@ -33,6 +35,7 @@ impl StdioBridge {
             auth_token: None,
             rate_limiter: Arc::new(RateLimiter::new(3, 10)),
             tls_config: None,
+            pairing_manager: None,
         }
     }
 
@@ -60,6 +63,17 @@ impl StdioBridge {
         self
     }
 
+    /// Enable pairing with the given manager
+    pub fn with_pairing(mut self, pairing_manager: PairingManager) -> Self {
+        self.pairing_manager = Some(Arc::new(pairing_manager));
+        self
+    }
+
+    /// Get a reference to the pairing manager (if enabled)
+    pub fn pairing_manager(&self) -> Option<&Arc<PairingManager>> {
+        self.pairing_manager.as_ref()
+    }
+
     /// Start the bridge server
     pub async fn start(&self) -> Result<()> {
         let addr = format!("{}:{}", self.bind_addr, self.port);
@@ -81,11 +95,17 @@ impl StdioBridge {
         } else {
             warn!("⚠️  Authentication disabled - connections are not secured!");
         }
+        
+        if self.pairing_manager.is_some() {
+            info!("🔗 Pairing endpoint available at /pair/local");
+        }
+        
         info!("🤖 Ready to accept mobile connections...");
 
         let auth_token = Arc::new(self.auth_token.clone());
         let rate_limiter = Arc::clone(&self.rate_limiter);
         let tls_config = self.tls_config.clone();
+        let pairing_manager = self.pairing_manager.clone();
 
         loop {
             match listener.accept().await {
@@ -105,6 +125,7 @@ impl StdioBridge {
                     let auth_token = Arc::clone(&auth_token);
                     let rate_limiter = Arc::clone(&rate_limiter);
                     let tls_config = tls_config.clone();
+                    let pairing_manager = pairing_manager.clone();
                     
                     tokio::spawn(async move {
                         // Register connection
@@ -114,7 +135,7 @@ impl StdioBridge {
                             // TLS connection
                             match tls.acceptor.accept(stream).await {
                                 Ok(tls_stream) => {
-                                    handle_connection_generic(tls_stream, agent_command, auth_token).await
+                                    handle_connection_generic(tls_stream, agent_command, auth_token, pairing_manager).await
                                 }
                                 Err(e) => {
                                     warn!("🚫 TLS handshake failed: {}", e);
@@ -123,7 +144,7 @@ impl StdioBridge {
                             }
                         } else {
                             // Plain TCP connection
-                            handle_connection_generic(stream, agent_command, auth_token).await
+                            handle_connection_generic(stream, agent_command, auth_token, pairing_manager).await
                         };
                         
                         // Always remove connection when done
@@ -142,8 +163,181 @@ impl StdioBridge {
     }
 }
 
-/// Handle a single WebSocket connection (generic over stream type for TLS/non-TLS)
-async fn handle_connection_generic<S>(stream: S, agent_command: String, auth_token: Arc<Option<String>>) -> Result<()>
+/// Handle a single connection (generic over stream type for TLS/non-TLS)
+/// This function first peeks at the HTTP request to determine if it's:
+/// 1. A pairing request (/pair/local) - respond with JSON
+/// 2. A WebSocket upgrade request - proceed with WebSocket handling
+async fn handle_connection_generic<S>(
+    mut stream: S, 
+    agent_command: String, 
+    auth_token: Arc<Option<String>>,
+    pairing_manager: Option<Arc<PairingManager>>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    // Read the HTTP request headers to determine the request type
+    let mut buffer = vec![0u8; 4096];
+    let n = stream.read(&mut buffer).await.context("Failed to read request")?;
+    let request_data = &buffer[..n];
+    
+    // Parse the first line to get the path
+    let request_str = String::from_utf8_lossy(request_data);
+    let first_line = request_str.lines().next().unwrap_or("");
+    
+    // Check if this is a pairing request
+    if first_line.contains("/pair/local") && first_line.starts_with("GET") {
+        info!("🔗 Pairing request received");
+        return handle_pairing_request(&mut stream, &request_str, pairing_manager).await;
+    }
+    
+    // Otherwise, it's a WebSocket upgrade - we need to create a stream that
+    // "unreads" the data we already consumed
+    let prefixed_stream = PrefixedStream::new(request_data.to_vec(), stream);
+    
+    // Continue with WebSocket handling
+    handle_websocket_connection(prefixed_stream, agent_command, auth_token).await
+}
+
+/// Handle a pairing request - validate the code and return connection details
+async fn handle_pairing_request<S>(
+    stream: &mut S,
+    request: &str,
+    pairing_manager: Option<Arc<PairingManager>>,
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    // Extract the code from the query string
+    let code = request
+        .lines()
+        .next()
+        .and_then(|line| {
+            // GET /pair/local?code=123456&fp=... HTTP/1.1
+            let path_part = line.split_whitespace().nth(1)?;
+            let query = path_part.split('?').nth(1)?;
+            query
+                .split('&')
+                .find(|p| p.starts_with("code="))
+                .map(|p| p[5..].to_string())
+        });
+
+    let Some(code) = code else {
+        let response = create_http_response(400, "Bad Request", r#"{"error":"missing_code","message":"Missing 'code' query parameter"}"#);
+        stream.write_all(response.as_bytes()).await?;
+        return Ok(());
+    };
+
+    let Some(manager) = pairing_manager else {
+        let response = create_http_response(503, "Service Unavailable", r#"{"error":"pairing_disabled","message":"Pairing is not enabled on this bridge"}"#);
+        stream.write_all(response.as_bytes()).await?;
+        return Ok(());
+    };
+
+    // Validate the pairing code
+    match manager.validate(&code) {
+        Ok(pairing_response) => {
+            info!("✅ Pairing successful");
+            let json = serde_json::to_string(&pairing_response).unwrap_or_default();
+            let response = create_http_response(200, "OK", &json);
+            stream.write_all(response.as_bytes()).await?;
+        }
+        Err(PairingError::RateLimited) => {
+            warn!("🚫 Pairing rate limited");
+            let json = serde_json::to_string(&PairingErrorResponse::rate_limited()).unwrap_or_default();
+            let response = create_http_response(429, "Too Many Requests", &json);
+            stream.write_all(response.as_bytes()).await?;
+        }
+        Err(_) => {
+            warn!("🚫 Invalid pairing code");
+            let json = serde_json::to_string(&PairingErrorResponse::invalid_code()).unwrap_or_default();
+            let response = create_http_response(401, "Unauthorized", &json);
+            stream.write_all(response.as_bytes()).await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Create an HTTP response with the given status and body
+fn create_http_response(status_code: u16, status_text: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {} {}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {}",
+        status_code,
+        status_text,
+        body.len(),
+        body
+    )
+}
+
+/// A stream wrapper that prepends buffered data before reading from the underlying stream
+struct PrefixedStream<S> {
+    prefix: Vec<u8>,
+    prefix_pos: usize,
+    inner: S,
+}
+
+impl<S> PrefixedStream<S> {
+    fn new(prefix: Vec<u8>, inner: S) -> Self {
+        Self {
+            prefix,
+            prefix_pos: 0,
+            inner,
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for PrefixedStream<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        // First, drain the prefix buffer
+        if self.prefix_pos < self.prefix.len() {
+            let remaining = &self.prefix[self.prefix_pos..];
+            let to_copy = std::cmp::min(remaining.len(), buf.remaining());
+            buf.put_slice(&remaining[..to_copy]);
+            self.prefix_pos += to_copy;
+            return std::task::Poll::Ready(Ok(()));
+        }
+        
+        // Then read from the inner stream
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// Handle WebSocket connection after initial HTTP parsing
+async fn handle_websocket_connection<S>(stream: S, agent_command: String, auth_token: Arc<Option<String>>) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {

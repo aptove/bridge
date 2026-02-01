@@ -5,6 +5,7 @@ use tracing::{info, error, warn};
 mod cloudflare;
 mod bridge;
 mod config;
+mod pairing;
 mod qr;
 mod rate_limiter;
 mod tls;
@@ -12,6 +13,7 @@ mod tls;
 use crate::cloudflare::CloudflareClient;
 use crate::bridge::StdioBridge;
 use crate::config::BridgeConfig;
+use crate::pairing::PairingManager;
 use crate::tls::TlsConfig;
 
 #[derive(Parser)]
@@ -255,8 +257,20 @@ async fn main() -> Result<()> {
                 cfg
             };
 
-            if qr {
-                qr::display_qr_code(&config)?;
+            // Create pairing manager if QR/pairing is enabled (create once, use for both display and bridge)
+            let pairing_manager = if qr {
+                Some(PairingManager::new(
+                    config.hostname.clone(),
+                    config.auth_token.clone(),
+                    config.cert_fingerprint.clone(),
+                ))
+            } else {
+                None
+            };
+
+            // Display QR code with pairing URL if enabled
+            if let Some(ref pm) = pairing_manager {
+                qr::display_qr_code_with_pairing(&config, pm)?;
             }
 
             info!("📡 Starting WebSocket server on {}:{}", bind, port);
@@ -268,6 +282,11 @@ async fn main() -> Result<()> {
                 .with_bind_addr(bind)
                 .with_auth_token(auth_token)
                 .with_rate_limits(max_connections_per_ip, max_attempts_per_minute);
+            
+            // Add pairing if enabled
+            if let Some(pm) = pairing_manager {
+                bridge = bridge.with_pairing(pm);
+            }
             
             // Add TLS if enabled
             if let Some(tls) = tls_config {

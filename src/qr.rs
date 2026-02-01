@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use qrcode::{QrCode, EcLevel};
 use crate::config::BridgeConfig;
+use crate::pairing::PairingManager;
 
 /// Unicode block characters for compact QR rendering
 /// Uses upper/lower half blocks to fit 2 rows per line
@@ -9,12 +10,10 @@ const TOP_BLACK: &str = "▀";
 const BOTTOM_BLACK: &str = "▄";
 const BOTH_WHITE: &str = " ";
 
-/// Display a QR code in the terminal for mobile scanning
-pub fn display_qr_code(config: &BridgeConfig) -> Result<()> {
-    let connection_json = config.to_connection_json()?;
-    
+/// Render a QR code to a string for terminal display
+fn render_qr_code(data: &str) -> Result<String> {
     // Use lower error correction to reduce QR code size
-    let code = QrCode::with_error_correction_level(connection_json.as_bytes(), EcLevel::L)
+    let code = QrCode::with_error_correction_level(data.as_bytes(), EcLevel::L)
         .context("Failed to generate QR code")?;
     
     let modules = code.to_colors();
@@ -67,7 +66,43 @@ pub fn display_qr_code(config: &BridgeConfig) -> Result<()> {
     }
     output.push('\n');
     
-    println!("{}", output);
+    Ok(output)
+}
+
+/// Display a QR code with pairing URL for secure mobile connection
+pub fn display_qr_code_with_pairing(config: &BridgeConfig, pairing: &PairingManager) -> Result<()> {
+    // Build the base URL for pairing (HTTPS)
+    let base_url = config.hostname.replace("wss://", "https://").replace("ws://", "http://");
+    let pairing_url = pairing.get_pairing_url(&base_url);
+    
+    // Render the QR code
+    let qr_output = render_qr_code(&pairing_url)?;
+    
+    // Display expiration notice
+    println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("  ⏱️  QR code expires in {} seconds | Single use only", pairing.seconds_remaining());
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    
+    // Display QR code
+    println!("{}", qr_output);
+    
+    // Display the full pairing URL
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("  📱 Scan QR code with your mobile app");
+    println!("  🔗 {}", pairing_url);
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    
+    Ok(())
+}
+
+/// Display a QR code in the terminal for mobile scanning (legacy, without pairing)
+pub fn display_qr_code(config: &BridgeConfig) -> Result<()> {
+    let connection_json = config.to_connection_json()?;
+    
+    // Render the QR code
+    let qr_output = render_qr_code(&connection_json)?;
+    
+    println!("{}", qr_output);
     
     // Parse and pretty-print the QR code content
     let json_value: serde_json::Value = serde_json::from_str(&connection_json)

@@ -59,5 +59,8 @@ sha2 = "0.10"
 hex = "0.4"
 time = "0.3.36"
 
+# URL encoding for pairing URLs
+urlencoding = "2.1"
+
 [dev-dependencies]
 mockito = "1.2"
