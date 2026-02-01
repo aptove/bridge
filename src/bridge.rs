@@ -1,17 +1,22 @@
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 use tokio::sync::mpsc;
-use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
+use tokio_tungstenite::tungstenite::handshake::server::{Request, Response, ErrorResponse};
+use tokio_tungstenite::tungstenite::protocol::Message;
+use tokio_tungstenite::tungstenite::http::StatusCode;
 use tracing::{debug, error, info, warn};
 
 /// Bridge between stdio-based ACP agents and WebSocket clients
 pub struct StdioBridge {
     agent_command: String,
     port: u16,
+    bind_addr: String,
+    auth_token: Option<String>,
 }
 
 impl StdioBridge {
@@ -19,28 +24,49 @@ impl StdioBridge {
         Self {
             agent_command,
             port,
+            bind_addr: "0.0.0.0".to_string(),
+            auth_token: None,
         }
+    }
+
+    /// Set the bind address
+    pub fn with_bind_addr(mut self, addr: String) -> Self {
+        self.bind_addr = addr;
+        self
+    }
+
+    /// Set the required authentication token
+    pub fn with_auth_token(mut self, token: Option<String>) -> Self {
+        self.auth_token = token;
+        self
     }
 
     /// Start the bridge server
     pub async fn start(&self) -> Result<()> {
-        let addr = format!("0.0.0.0:{}", self.port);
+        let addr = format!("{}:{}", self.bind_addr, self.port);
         let listener = TcpListener::bind(&addr)
             .await
             .context(format!("Failed to bind to {}", addr))?;
 
         info!("✅ WebSocket server listening on {}", addr);
-        info!("🔗 Cloudflare tunnel should route traffic to this port");
+        if self.auth_token.is_some() {
+            info!("🔐 Authentication required for connections");
+        } else {
+            warn!("⚠️  Authentication disabled - connections are not secured!");
+        }
         info!("🤖 Ready to accept mobile connections...");
+
+        let auth_token = Arc::new(self.auth_token.clone());
 
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     info!("📱 New connection from: {}", addr);
                     let agent_command = self.agent_command.clone();
+                    let auth_token = Arc::clone(&auth_token);
                     
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, agent_command).await {
+                        if let Err(e) = handle_connection(stream, agent_command, auth_token).await {
                             error!("Connection error: {}", e);
                         }
                     });
@@ -54,11 +80,57 @@ impl StdioBridge {
 }
 
 /// Handle a single WebSocket connection
-async fn handle_connection(stream: TcpStream, agent_command: String) -> Result<()> {
-    // Upgrade to WebSocket
-    let ws_stream = accept_async(stream)
-        .await
-        .context("Failed to accept WebSocket connection")?;
+async fn handle_connection(stream: TcpStream, agent_command: String, auth_token: Arc<Option<String>>) -> Result<()> {
+    // Custom callback to validate auth token during WebSocket handshake
+    let auth_token_for_callback = Arc::clone(&auth_token);
+    let callback = move |req: &Request, response: Response| -> std::result::Result<Response, ErrorResponse> {
+        if let Some(expected_token) = auth_token_for_callback.as_ref() {
+            // Check for auth token in headers
+            let token_valid = req.headers()
+                .get("X-Bridge-Token")
+                .and_then(|v| v.to_str().ok())
+                .map(|t| t == expected_token)
+                .unwrap_or(false);
+            
+            // Also check query string as fallback (for clients that can't set headers)
+            let query_token_valid = if !token_valid {
+                req.uri().query()
+                    .and_then(|q| {
+                        q.split('&')
+                            .find(|p| p.starts_with("token="))
+                            .map(|p| &p[6..])
+                    })
+                    .map(|t| t == expected_token)
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            
+            if !token_valid && !query_token_valid {
+                // Log is not available here since we're in a sync closure
+                // Build a 401 error response
+                let error_response = tokio_tungstenite::tungstenite::http::Response::builder()
+                    .status(StatusCode::UNAUTHORIZED)
+                    .body(Some("Unauthorized: invalid or missing auth token".into()))
+                    .unwrap();
+                return Err(error_response);
+            }
+        }
+        Ok(response)
+    };
+    
+    // Upgrade to WebSocket with auth callback
+    let ws_stream = match tokio_tungstenite::accept_hdr_async(stream, callback).await {
+        Ok(ws) => ws,
+        Err(e) => {
+            warn!("🚫 Connection rejected: {}", e);
+            return Err(anyhow::anyhow!("WebSocket handshake failed: {}", e));
+        }
+    };
+    
+    if auth_token.is_some() {
+        info!("🔓 Auth token validated");
+    }
 
     info!("✅ WebSocket connection established");
 

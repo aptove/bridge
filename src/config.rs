@@ -13,6 +13,9 @@ pub struct BridgeConfig {
     pub client_secret: String,
     pub domain: String,
     pub subdomain: String,
+    /// Authentication token for WebSocket connections (generated on first run)
+    #[serde(default)]
+    pub auth_token: String,
 }
 
 impl BridgeConfig {
@@ -27,16 +30,39 @@ impl BridgeConfig {
         config_dir_path.join("config.json")
     }
 
-    /// Save configuration to disk
+    /// Save configuration to disk with secure permissions
     pub fn save(&self) -> Result<()> {
         let config_path = Self::config_path();
         let json = serde_json::to_string_pretty(self)
             .context("Failed to serialize configuration")?;
         
-        fs::write(&config_path, json)
+        fs::write(&config_path, &json)
             .context(format!("Failed to write configuration to {:?}", config_path))?;
         
+        // Set restrictive file permissions (Unix only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&config_path)?.permissions();
+            perms.set_mode(0o600); // rw-------
+            fs::set_permissions(&config_path, perms)?;
+        }
+        
         Ok(())
+    }
+
+    /// Generate a random authentication token
+    pub fn generate_auth_token() -> String {
+        use base64::{engine::general_purpose, Engine as _};
+        let random_bytes: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
+        general_purpose::URL_SAFE_NO_PAD.encode(random_bytes)
+    }
+
+    /// Ensure auth_token is populated, generating one if needed
+    pub fn ensure_auth_token(&mut self) {
+        if self.auth_token.is_empty() {
+            self.auth_token = Self::generate_auth_token();
+        }
     }
 
     /// Load configuration from disk
@@ -66,6 +92,11 @@ impl BridgeConfig {
 
         if !self.client_secret.is_empty() {
             map.insert("clientSecret".to_string(), Value::String(self.client_secret.clone()));
+        }
+
+        // Include auth token for WebSocket authentication
+        if !self.auth_token.is_empty() {
+            map.insert("authToken".to_string(), Value::String(self.auth_token.clone()));
         }
 
         serde_json::to_string(&Value::Object(map))

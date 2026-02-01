@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing::{info, error};
+use tracing::{info, error, warn};
 
 mod cloudflare;
 mod bridge;
@@ -54,13 +54,21 @@ enum Commands {
         #[arg(short, long, default_value = "8080")]
         port: u16,
         
+        /// Address to bind the WebSocket server (use 127.0.0.1 for localhost only)
+        #[arg(short, long, default_value = "0.0.0.0")]
+        bind: String,
+        
         /// Show QR code for mobile connection
-        #[arg(short, long)]
+        #[arg(short = 'Q', long)]
         qr: bool,
         
         /// Run in stdio-proxy mode (no Cloudflare). Exposes local WebSocket for mobile clients.
         #[arg(long)]
         stdio_proxy: bool,
+        
+        /// Disable authentication (NOT RECOMMENDED - use only for development)
+        #[arg(long)]
+        no_auth: bool,
         
         /// Enable verbose logging (shows info level logs)
         #[arg(short, long)]
@@ -138,7 +146,7 @@ async fn main() -> Result<()> {
             info!("✅ Tunnel ingress configured");
             
             // Step 6: Save configuration
-            let config = BridgeConfig {
+            let mut config = BridgeConfig {
                 hostname: format!("https://{}", hostname),
                 tunnel_id: tunnel.id.clone(),
                 tunnel_secret: tunnel.secret.clone(),
@@ -146,7 +154,11 @@ async fn main() -> Result<()> {
                 client_secret: service_token.client_secret,
                 domain,
                 subdomain,
+                auth_token: String::new(),
             };
+            
+            // Generate auth token for secure connections
+            config.ensure_auth_token();
             
             config.save()?;
             info!("✅ Configuration saved to: {}", BridgeConfig::config_path().display());
@@ -160,13 +172,18 @@ async fn main() -> Result<()> {
             println!("\n🚀 Start the bridge with: bridge start --agent-command \"gemini --experimental-acp\"");
         }
         
-        Commands::Start { agent_command, port, qr, stdio_proxy, verbose: _ } => {
+        Commands::Start { agent_command, port, bind, qr, stdio_proxy, no_auth, verbose: _ } => {
             info!("🌉 Starting ACP Bridge...");
+            
+            if no_auth {
+                warn!("⚠️  Authentication disabled with --no-auth flag. This is NOT recommended for production!");
+            }
+            
             // If stdio_proxy is enabled, bypass Cloudflare and construct a local connection URL.
             let config = if stdio_proxy {
                 // Determine a sensible local IP to advertise to mobile clients
                 // Try to detect local outbound IP; fall back to 127.0.0.1 on failure
-                let ip = {
+                let ip = if bind == "0.0.0.0" {
                     use std::net::UdpSocket;
                     match UdpSocket::bind("0.0.0.0:0") {
                         Ok(sock) => {
@@ -181,11 +198,13 @@ async fn main() -> Result<()> {
                         }
                         Err(_) => "127.0.0.1".to_string(),
                     }
+                } else {
+                    bind.clone()
                 };
 
                 let hostname = format!("ws://{}:{}", ip, port);
 
-                BridgeConfig {
+                let mut cfg = BridgeConfig {
                     hostname,
                     tunnel_id: String::new(),
                     tunnel_secret: String::new(),
@@ -193,19 +212,38 @@ async fn main() -> Result<()> {
                     client_secret: String::new(),
                     domain: String::new(),
                     subdomain: String::new(),
+                    auth_token: String::new(),
+                };
+                
+                // Generate and persist auth token for stdio-proxy mode
+                if !no_auth {
+                    cfg.ensure_auth_token();
                 }
+                
+                cfg
             } else {
-                BridgeConfig::load()?
+                let mut cfg = BridgeConfig::load()?;
+                // Ensure auth token exists for loaded config
+                if !no_auth && cfg.auth_token.is_empty() {
+                    cfg.ensure_auth_token();
+                    cfg.save()?;
+                    info!("🔑 Generated new auth token and saved to config");
+                }
+                cfg
             };
 
             if qr {
                 qr::display_qr_code(&config)?;
             }
 
-            info!("📡 Starting WebSocket server on port {}", port);
+            info!("📡 Starting WebSocket server on {}:{}", bind, port);
             info!("🤖 Agent command: {}", agent_command);
 
-            let bridge = StdioBridge::new(agent_command, port);
+            let auth_token = if no_auth { None } else { Some(config.auth_token.clone()) };
+            
+            let bridge = StdioBridge::new(agent_command, port)
+                .with_bind_addr(bind)
+                .with_auth_token(auth_token);
             bridge.start().await?;
         }
         

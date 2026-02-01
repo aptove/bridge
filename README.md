@@ -97,11 +97,12 @@ The QR code contains a JSON payload:
 {
   "url": "ws://192.168.1.100:8080",
   "protocol": "acp",
-  "version": "1.0"
+  "version": "1.0",
+  "authToken": "abc123..."
 }
 ```
 
-Your mobile app connects via plain WebSocket to the local IP and port.
+Your mobile app connects via WebSocket to the local IP and port, providing the auth token for authentication.
 
 ## Command Options
 
@@ -110,7 +111,7 @@ Your mobile app connects via plain WebSocket to the local IP and port.
 Start the WebSocket bridge server:
 
 ```bash
-acp-cloudflare-bridge start [OPTIONS]
+bridge start [OPTIONS]
 ```
 
 **Options:**
@@ -119,20 +120,31 @@ acp-cloudflare-bridge start [OPTIONS]
 |--------|-------------|---------|
 | `--agent-command <CMD>` | Command to spawn the ACP agent | Required |
 | `--port <PORT>` | Local WebSocket port | `8080` |
-| `--stdio-proxy` | Enable stdio proxy mode | Required for local use |
-| `--host <HOST>` | Host to bind to | `0.0.0.0` |
+| `--bind <ADDR>` | Address to bind (use `127.0.0.1` for localhost only) | `0.0.0.0` |
+| `--stdio-proxy` | Enable stdio proxy mode (bypasses Cloudflare) | Required for local use |
+| `--qr` | Display QR code for mobile connection | Off |
+| `--no-auth` | Disable authentication (NOT recommended) | Auth enabled |
+| `--verbose` | Enable verbose logging | Off |
 
 ### Examples
 
 ```bash
-# GitHub Copilot
-./target/release/acp-cloudflare-bridge start \
+# GitHub Copilot with QR code
+./target/release/bridge start \
   --agent-command "copilot --acp" \
+  --port 8080 \
+  --stdio-proxy \
+  --qr
+
+# Bind to localhost only (more secure)
+./target/release/bridge start \
+  --agent-command "copilot --acp" \
+  --bind 127.0.0.1 \
   --port 8080 \
   --stdio-proxy
 
 # Custom agent with arguments
-./target/release/acp-cloudflare-bridge start \
+./target/release/bridge start \
   --agent-command "/path/to/my-agent --verbose" \
   --port 9000 \
   --stdio-proxy
@@ -174,14 +186,38 @@ Ensure the agent accepts stdin and produces stdout in JSON-RPC format.
 - Try moving closer to your router
 - Ensure no VPN is interfering with local network traffic
 
-## Security Considerations
+## Security
 
-⚠️ **Local Network Only**: This bridge is designed for local development and personal use. The WebSocket connection is **not encrypted** (ws://, not wss://).
+### Authentication
+
+The bridge generates a unique authentication token on first run. This token:
+- Is included in the QR code automatically
+- Must be provided by mobile apps in the `X-Bridge-Token` header (or `?token=` query parameter)
+- Is stored securely with restricted file permissions (0600 on Unix)
+
+**To disable authentication** (not recommended):
+```bash
+./target/release/bridge start --agent-command "copilot --acp" --stdio-proxy --no-auth
+```
+
+### Network Security
+
+⚠️ **Local Network Only**: This bridge is designed for local development and personal use. 
 
 **Best practices:**
+- Use `--bind 127.0.0.1` to restrict to localhost when possible
 - Only use on trusted networks (your home Wi-Fi)
 - Don't expose the bridge port to the internet
 - Stop the bridge when not in use
+- Keep the auth token secret - anyone with it can execute commands via your agent
+
+### Config File Location
+
+Configuration and auth token are stored at:
+- **macOS**: `~/Library/Application Support/com.bridge.bridge/config.json`
+- **Linux**: `~/.config/bridge/config.json`
+
+The config file is created with restrictive permissions (0600) to protect the auth token.
 
 ## Development
 
