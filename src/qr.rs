@@ -68,15 +68,54 @@ pub fn display_qr_code(config: &BridgeConfig) -> Result<()> {
     output.push('\n');
     
     println!("{}", output);
-    println!("Connection Details:");
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("URL: {}", config.hostname);
-    if config.client_id.is_empty() {
-        println!("Client ID: N/A (direct websocket)");
-    } else {
-        println!("Client ID: {}...", &config.client_id[..20.min(config.client_id.len())]);
+    
+    // Parse and pretty-print the QR code content
+    let json_value: serde_json::Value = serde_json::from_str(&connection_json)
+        .context("Failed to parse connection JSON")?;
+    
+    println!("QR Code Content:");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    
+    // Print each field with appropriate masking for sensitive data
+    if let Some(url) = json_value.get("url").and_then(|v| v.as_str()) {
+        println!("  URL:             {}", url);
     }
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    if let Some(protocol) = json_value.get("protocol").and_then(|v| v.as_str()) {
+        println!("  Protocol:        {}", protocol);
+    }
+    if let Some(version) = json_value.get("version").and_then(|v| v.as_str()) {
+        println!("  Version:         {}", version);
+    }
+    if let Some(client_id) = json_value.get("clientId").and_then(|v| v.as_str()) {
+        if client_id.len() > 8 {
+            println!("  Client ID:       {}...{}", &client_id[..4], &client_id[client_id.len()-4..]);
+        } else {
+            println!("  Client ID:       {}", client_id);
+        }
+    }
+    if let Some(client_secret) = json_value.get("clientSecret").and_then(|v| v.as_str()) {
+        println!("  Client Secret:   {}... (hidden)", &client_secret[..4.min(client_secret.len())]);
+    }
+    if let Some(auth_token) = json_value.get("authToken").and_then(|v| v.as_str()) {
+        println!("  Auth Token:      {}... (hidden)", &auth_token[..4.min(auth_token.len())]);
+    }
+    if let Some(fingerprint) = json_value.get("certFingerprint").and_then(|v| v.as_str()) {
+        if fingerprint.len() > 16 {
+            println!("  TLS Fingerprint: {}...{}", &fingerprint[..8], &fingerprint[fingerprint.len()-8..]);
+        } else {
+            println!("  TLS Fingerprint: {}", fingerprint);
+        }
+    }
+    
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    
+    // Indicate the connection type
+    if config.client_id.is_empty() {
+        println!("  Mode: Direct WebSocket (local network)");
+    } else {
+        println!("  Mode: Cloudflare Tunnel (internet accessible)");
+    }
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
     
     Ok(())
 }
