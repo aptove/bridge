@@ -2,6 +2,15 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// Global custom config directory (set via --config-dir)
+static CUSTOM_CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Set a custom config directory (call before any config operations)
+pub fn set_config_dir(path: PathBuf) {
+    CUSTOM_CONFIG_DIR.set(path).ok();
+}
 
 /// Configuration for the ACP-Cloudflare bridge
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -29,10 +38,15 @@ impl BridgeConfig {
     
     /// Get the configuration directory path
     pub fn config_dir() -> PathBuf {
-        let config_dir = directories::ProjectDirs::from("com", "bridge", "bridge")
-            .expect("Failed to determine config directory");
+        // Use custom config dir if set, otherwise use system default
+        let config_dir_path = if let Some(custom_dir) = CUSTOM_CONFIG_DIR.get() {
+            custom_dir.clone()
+        } else {
+            let config_dir = directories::ProjectDirs::from("com", "bridge", "bridge")
+                .expect("Failed to determine config directory");
+            config_dir.config_dir().to_path_buf()
+        };
         
-        let config_dir_path = config_dir.config_dir().to_path_buf();
         fs::create_dir_all(&config_dir_path).ok();
         
         config_dir_path

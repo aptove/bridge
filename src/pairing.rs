@@ -91,6 +91,7 @@ impl PairingManager {
     }
 
     /// Get the current pairing code
+    #[allow(dead_code)]
     pub fn get_code(&self) -> &str {
         &self.code
     }
@@ -112,6 +113,7 @@ impl PairingManager {
     }
 
     /// Check if the code has been used
+    #[allow(dead_code)]
     pub fn is_used(&self) -> bool {
         self.used.load(Ordering::SeqCst)
     }
@@ -166,6 +168,7 @@ impl PairingManager {
     }
 
     /// Get the certificate fingerprint (if available)
+    #[allow(dead_code)]
     pub fn get_cert_fingerprint(&self) -> Option<&str> {
         self.cert_fingerprint.as_deref()
     }

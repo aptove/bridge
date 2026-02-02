@@ -56,11 +56,18 @@ Scan the QR code with the Aptove iOS app to connect.
 | `--no-tls` | Disable TLS encryption | TLS enabled |
 | `--max-connections-per-ip <N>` | Max concurrent connections per IP | `3` |
 | `--max-attempts-per-minute <N>` | Max connection attempts per minute per IP | `10` |
+| `--config-dir <PATH>` | Custom configuration directory | System default |
 
 ## Config Location
 
+Default locations (can be overridden with `--config-dir`):
 - **macOS**: `~/Library/Application Support/com.bridge.bridge/`
 - **Linux**: `~/.config/bridge/`
+
+Example with custom config directory:
+```bash
+./target/release/bridge --config-dir ./my-config start --agent-command "copilot --acp" --qr
+```
 
 ## Development
 

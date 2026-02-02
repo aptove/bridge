@@ -13,8 +13,10 @@ const KEY_FILENAME: &str = "key.pem";
 /// TLS configuration for the bridge
 pub struct TlsConfig {
     /// Path to the certificate file
+    #[allow(dead_code)]
     pub cert_path: PathBuf,
     /// Path to the private key file
+    #[allow(dead_code)]
     pub key_path: PathBuf,
     /// SHA256 fingerprint of the certificate (hex encoded)
     pub fingerprint: String,

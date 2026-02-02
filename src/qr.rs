@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use qrcode::{QrCode, EcLevel};
 use crate::config::BridgeConfig;
 use crate::pairing::PairingManager;
+use std::path::PathBuf;
 
 /// Unicode block characters for compact QR rendering
 /// Uses upper/lower half blocks to fit 2 rows per line
@@ -9,6 +10,39 @@ const BOTH_BLACK: &str = "█";
 const TOP_BLACK: &str = "▀";
 const BOTTOM_BLACK: &str = "▄";
 const BOTH_WHITE: &str = " ";
+
+/// Save a QR code as a PNG image file for easier scanning
+fn save_qr_code_image(data: &str, path: &PathBuf) -> Result<()> {
+    use image::{Luma, GrayImage};
+    
+    let code = QrCode::with_error_correction_level(data.as_bytes(), EcLevel::L)
+        .context("Failed to generate QR code")?;
+    
+    let width = code.width();
+    let scale = 10; // 10 pixels per module
+    let border = 4;  // 4 module quiet zone
+    let img_size = (width + border * 2) * scale;
+    
+    let mut img = GrayImage::from_pixel(img_size as u32, img_size as u32, Luma([255u8]));
+    
+    for (y, row) in code.to_colors().chunks(width).enumerate() {
+        for (x, &color) in row.iter().enumerate() {
+            if color == qrcode::Color::Dark {
+                // Draw a scaled black square
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let px = ((x + border) * scale + dx) as u32;
+                        let py = ((y + border) * scale + dy) as u32;
+                        img.put_pixel(px, py, Luma([0u8]));
+                    }
+                }
+            }
+        }
+    }
+    
+    img.save(path).context("Failed to save QR code image")?;
+    Ok(())
+}
 
 /// Render a QR code to a string for terminal display
 fn render_qr_code(data: &str) -> Result<String> {
@@ -78,6 +112,12 @@ pub fn display_qr_code_with_pairing(config: &BridgeConfig, pairing: &PairingMana
     // Render the QR code
     let qr_output = render_qr_code(&pairing_url)?;
     
+    // Save QR code as image for easier scanning
+    let qr_image_path = std::env::temp_dir().join("bridge_pairing_qr.png");
+    if let Err(e) = save_qr_code_image(&pairing_url, &qr_image_path) {
+        tracing::warn!("Could not save QR code image: {}", e);
+    }
+    
     // Display expiration notice
     println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("  ⏱️  QR code expires in {} seconds | Single use only", pairing.seconds_remaining());
@@ -86,10 +126,14 @@ pub fn display_qr_code_with_pairing(config: &BridgeConfig, pairing: &PairingMana
     // Display QR code
     println!("{}", qr_output);
     
-    // Display the full pairing URL
+    // Display the full pairing URL and image path
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("  📱 Scan QR code with your mobile app");
     println!("  🔗 {}", pairing_url);
+    if qr_image_path.exists() {
+        println!("  🖼️  QR image saved to: {}", qr_image_path.display());
+        println!("     (Open this file if terminal QR code doesn't scan)");
+    }
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
     
     Ok(())

@@ -70,6 +70,7 @@ impl StdioBridge {
     }
 
     /// Get a reference to the pairing manager (if enabled)
+    #[allow(dead_code)]
     pub fn pairing_manager(&self) -> Option<&Arc<PairingManager>> {
         self.pairing_manager.as_ref()
     }

@@ -20,6 +20,10 @@ use crate::tls::TlsConfig;
 #[command(name = "bridge")]
 #[command(about = "Bridge stdio-based ACP agents to mobile apps via Cloudflare Zero Trust", long_about = None)]
 struct Cli {
+    /// Custom configuration directory (default: system config location)
+    #[arg(long, global = true)]
+    config_dir: Option<std::path::PathBuf>,
+    
     #[command(subcommand)]
     command: Commands,
 }
@@ -102,6 +106,11 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Set custom config directory if provided
+    if let Some(config_dir) = cli.config_dir {
+        config::set_config_dir(config_dir);
+    }
 
     // Determine log level based on command and flags
     let log_level = match &cli.command {
