@@ -73,49 +73,13 @@ Scan the QR code with the Aptove iOS app to connect.
 
 ## Session Persistence (Keep-Alive)
 
-By default, the bridge kills the agent process when a client disconnects. With `--keep-alive`, agent processes remain alive during temporary disconnections (network switches, app backgrounding), enabling seamless session resumption.
+With `--keep-alive`, agent processes remain alive during temporary disconnections (network switches, app backgrounding), enabling seamless session resumption. The bridge intercepts re-initialization requests on reconnect to preserve full conversation context.
 
-### How It Works
-
-1. Client connects → Bridge looks up existing agent by auth token, or spawns new
-2. Client disconnects → Agent stays alive in the pool, enters idle state
-3. Client reconnects → Bridge reattaches to the same agent process
-4. Idle timeout → Agent is terminated after configurable period of no client
-
-### Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      AGENT POOL                             │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  token_abc → Agent Process [connected]               │   │
-│  │  token_xyz → Agent Process [idle: 5min]              │   │
-│  └──────────────────────────────────────────────────────┘   │
-│  Reaper task: checks every 60s, kills idle agents           │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Configuration
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--keep-alive` | Enable session persistence | Off |
-| `--session-timeout <secs>` | How long idle agents stay alive | 1800 (30 min) |
-| `--max-agents <n>` | Max concurrent agents in pool | 10 |
-| `--buffer-messages` | Buffer agent output during disconnect | Off |
+📖 **For detailed architecture, reconnection flow, and troubleshooting, see [Persistent Sessions Documentation](docs/session/persistent-session.md).**
 
 ## Troubleshooting
 
-### Session Persistence Issues
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| Agent not reused after reconnect | Auth token mismatch between connections | Ensure the mobile app sends the same `X-Bridge-Token` header on reconnect |
-| Agent killed immediately on disconnect | `--keep-alive` flag not set | Add `--keep-alive` to the start command |
-| "Agent pool is full" error | All agent slots occupied by connected clients | Increase `--max-agents` or disconnect unused sessions |
-| Messages lost during disconnect | Message buffering not enabled | Add `--buffer-messages` flag |
-| Agent dies while client is away | Process crashed or idle timeout too short | Increase `--session-timeout`; check agent stderr logs with `--verbose` |
-| Reconnect works but state is lost | Agent process itself doesn't persist state | This is agent-specific; the bridge preserves the *process*, not internal state |
+> **Session persistence issues?** See the [Persistent Sessions Troubleshooting](docs/session/persistent-session.md#troubleshooting) guide.
 
 ### Connection Issues
 
@@ -158,11 +122,7 @@ echo '{"jsonrpc":"2.0","method":"initialize","id":1}' | copilot --acp
 
 ### Session Persistence Security
 
-- **Token-based routing**: Agent processes are keyed by auth token. A valid token is required to reconnect to an existing session.
-- **No cross-session access**: Each token maps to exactly one agent process. Clients cannot access other sessions.
-- **Idle timeout**: Disconnected agents are automatically terminated after `--session-timeout` seconds, limiting the window for stale sessions.
-- **Max-agents limit**: Prevents resource exhaustion by capping the number of concurrent agent processes.
-- **Process isolation**: Each agent runs as a separate OS process with its own stdin/stdout.
+Sessions are isolated by auth token with idle timeouts and max-agent limits. See [Persistent Sessions — Security](docs/session/persistent-session.md#security) for details.
 
 ### Rate Limiting
 
