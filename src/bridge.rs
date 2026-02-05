@@ -451,7 +451,7 @@ where
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
     
     // Get or spawn agent from pool
-    let (ws_to_agent_tx, mut agent_to_ws_rx, buffered, was_reused) = {
+    let (ws_to_agent_tx, mut agent_to_ws_rx, buffered, was_reused, cached_init) = {
         let mut pool = pool.write().await;
         pool.get_or_spawn(&token, &agent_command).await?
     };
@@ -470,8 +470,34 @@ where
         }
     }
     
+    // If reconnecting and we have a cached initialize response, intercept the
+    // client's `initialize` request and reply with the cached response.
+    // This prevents the agent from being re-initialized and losing its state.
+    if was_reused {
+        if let Some(ref cached) = cached_init {
+            info!("🔄 Intercepting initialize for session resumption");
+            // Wait for the client's first message (should be `initialize`)
+            let init_handled = handle_initialize_intercept(
+                &mut ws_receiver, &mut ws_sender, cached
+            ).await;
+            if init_handled {
+                info!("✅ Initialize intercepted, session state preserved");
+            } else {
+                warn!("⚠️  First message was not initialize, proceeding normally");
+            }
+        } else {
+            debug!("No cached initialize response, first connection will capture it");
+        }
+    }
+    
     // Create shutdown channel
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+    
+    // For a fresh connection, we need to capture the initialize response
+    // from the agent so we can cache it for future reconnections.
+    let needs_init_capture = !was_reused;
+    let token_for_capture = token.clone();
+    let pool_for_capture = Arc::clone(&pool);
     
     // Task 1: WebSocket → Agent (via channel)
     let ws_to_agent_tx_clone = ws_to_agent_tx.clone();
@@ -509,9 +535,20 @@ where
     let token_for_buffer = token.clone();
     let pool_for_buffer = Arc::clone(&pool);
     let agent_to_ws = tokio::spawn(async move {
+        let mut init_captured = false;
         loop {
             match agent_to_ws_rx.recv().await {
                 Ok(line) => {
+                    // On first connection, capture the initialize response
+                    if needs_init_capture && !init_captured {
+                        if is_initialize_response(&line) {
+                            info!("📋 Captured initialize response for future reconnections");
+                            let mut pool = pool_for_capture.write().await;
+                            pool.cache_init_response(&token_for_capture, line.clone());
+                            init_captured = true;
+                        }
+                    }
+                    
                     debug!("📤 Sending to Mobile ({} bytes): {}", line.len(), 
                         line.chars().take(200).collect::<String>());
                     
@@ -561,6 +598,83 @@ where
     
     Ok(())
 }
+
+/// Check if a JSON-RPC message is an `initialize` response (has "result" with "capabilities")
+fn is_initialize_response(msg: &str) -> bool {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg) {
+        // It's a response (has "result") and the result contains agent capabilities
+        v.get("result").is_some()
+            && (v["result"].get("capabilities").is_some()
+                || v["result"].get("serverInfo").is_some()
+                || v["result"].get("agentInfo").is_some())
+    } else {
+        false
+    }
+}
+
+/// Intercept the client's `initialize` request and reply with a cached response.
+/// Returns true if an initialize was intercepted, false otherwise.
+async fn handle_initialize_intercept<S>(
+    ws_receiver: &mut futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<S>>,
+    ws_sender: &mut futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<S>, Message>,
+    cached_response: &str,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    // Read the first message from the client
+    let first_msg = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        ws_receiver.next(),
+    ).await {
+        Ok(Some(Ok(msg))) if msg.is_text() || msg.is_binary() => {
+            String::from_utf8_lossy(&msg.into_data()).to_string()
+        }
+        _ => return false,
+    };
+    
+    // Parse it as JSON-RPC to check if it's an `initialize` request
+    let request: serde_json::Value = match serde_json::from_str(&first_msg) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    
+    let method = request.get("method").and_then(|m| m.as_str());
+    if method != Some("initialize") {
+        debug!("First message is not initialize (method={:?}), cannot intercept", method);
+        return false;
+    }
+    
+    // Extract the request ID so we can match it in the response
+    let request_id = match request.get("id") {
+        Some(id) => id.clone(),
+        None => return false,
+    };
+    
+    info!("🔄 Intercepting initialize request (id={})", request_id);
+    
+    // Parse the cached response and replace its "id" with the new request's "id"
+    let mut cached: serde_json::Value = match serde_json::from_str(cached_response) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Failed to parse cached initialize response: {}", e);
+            return false;
+        }
+    };
+    
+    cached["id"] = request_id;
+    
+    let response_str = serde_json::to_string(&cached).unwrap_or_default();
+    debug!("🔄 Sending cached initialize response ({} bytes)", response_str.len());
+    
+    if let Err(e) = ws_sender.send(Message::Text(response_str)).await {
+        error!("Failed to send cached initialize response: {}", e);
+        return false;
+    }
+    
+    true
+}
+
 
 /// Handle WebSocket connection in legacy mode (kill-on-drop, no pool)
 async fn handle_websocket_legacy<S>(ws_stream: tokio_tungstenite::WebSocketStream<S>, agent_command: String) -> Result<()>
