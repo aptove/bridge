@@ -304,6 +304,24 @@ impl AgentPool {
         }
     }
 
+    /// Check if the pool contains an agent for the given token
+    #[allow(dead_code)]
+    pub fn contains(&self, token: &str) -> bool {
+        self.agents.contains_key(token)
+    }
+
+    /// Kill a specific agent's process (for testing).
+    /// Returns true if the agent existed.
+    #[allow(dead_code)]
+    pub async fn kill_agent(&mut self, token: &str) -> bool {
+        if let Some(agent) = self.agents.get_mut(token) {
+            agent.kill().await;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Buffer a message for a disconnected agent
     pub fn buffer_message(&mut self, token: &str, message: String) {
         if !self.config.buffer_messages {
@@ -364,4 +382,405 @@ pub fn start_reaper(pool: Arc<RwLock<AgentPool>>, check_interval: Duration) -> t
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> PoolConfig {
+        PoolConfig {
+            idle_timeout: Duration::from_secs(2),
+            max_agents: 3,
+            buffer_messages: true,
+            max_buffer_size: 5,
+        }
+    }
+
+    // ── PoolConfig defaults ──────────────────────────────────────────
+
+    #[test]
+    fn pool_config_default_values() {
+        let cfg = PoolConfig::default();
+        assert_eq!(cfg.idle_timeout, Duration::from_secs(1800));
+        assert_eq!(cfg.max_agents, 10);
+        assert!(!cfg.buffer_messages);
+        assert_eq!(cfg.max_buffer_size, 1000);
+    }
+
+    // ── AgentPool::new ───────────────────────────────────────────────
+
+    #[test]
+    fn new_pool_is_empty() {
+        let pool = AgentPool::new(test_config());
+        let stats = pool.stats();
+        assert_eq!(stats.total, 0);
+        assert_eq!(stats.connected, 0);
+        assert_eq!(stats.idle, 0);
+        assert_eq!(stats.max, 3);
+    }
+
+    // ── get_or_spawn ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn spawn_new_agent_with_cat() {
+        let mut pool = AgentPool::new(test_config());
+        let result = pool.get_or_spawn("token_a", "cat").await;
+        assert!(result.is_ok());
+
+        let (_tx, _rx, buffered, was_reused) = result.unwrap();
+        assert!(!was_reused, "first spawn should not be reused");
+        assert!(buffered.is_empty(), "first spawn should have no buffered msgs");
+
+        let stats = pool.stats();
+        assert_eq!(stats.total, 1);
+        assert_eq!(stats.connected, 1);
+
+        pool.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn reuse_existing_agent() {
+        let mut pool = AgentPool::new(test_config());
+
+        // First spawn
+        let _ = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        pool.mark_disconnected("token_a");
+
+        // Reconnect
+        let (_tx, _rx, _buf, was_reused) = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        assert!(was_reused, "second call should reuse the agent");
+        assert_eq!(pool.stats().total, 1);
+
+        pool.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn spawn_different_tokens() {
+        let mut pool = AgentPool::new(test_config());
+        let _ = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        let _ = pool.get_or_spawn("token_b", "cat").await.unwrap();
+
+        assert_eq!(pool.stats().total, 2);
+        assert_eq!(pool.stats().connected, 2);
+
+        pool.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn spawn_with_invalid_command_fails() {
+        let mut pool = AgentPool::new(test_config());
+        let result = pool.get_or_spawn("token_a", "nonexistent_binary_xyz_42").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn spawn_with_empty_command_fails() {
+        let mut pool = AgentPool::new(test_config());
+        let result = pool.get_or_spawn("token_a", "").await;
+        assert!(result.is_err());
+    }
+
+    // ── mark_disconnected / mark_connected ───────────────────────────
+
+    #[tokio::test]
+    async fn mark_disconnected_updates_state() {
+        let mut pool = AgentPool::new(test_config());
+        let _ = pool.get_or_spawn("token_a", "cat").await.unwrap();
+
+        assert!(pool.agents.get("token_a").unwrap().connected);
+
+        pool.mark_disconnected("token_a");
+
+        let agent = pool.agents.get("token_a").unwrap();
+        assert!(!agent.connected);
+        assert!(agent.disconnected_at.is_some());
+
+        let stats = pool.stats();
+        assert_eq!(stats.connected, 0);
+        assert_eq!(stats.idle, 1);
+
+        pool.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_clears_disconnected_state() {
+        let mut pool = AgentPool::new(test_config());
+        let _ = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        pool.mark_disconnected("token_a");
+
+        // Reconnect
+        let _ = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        let agent = pool.agents.get("token_a").unwrap();
+        assert!(agent.connected);
+        assert!(agent.disconnected_at.is_none());
+
+        pool.shutdown_all().await;
+    }
+
+    // ── max-agents limit ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn max_agents_evicts_idle() {
+        let mut pool = AgentPool::new(test_config()); // max_agents = 3
+
+        let _ = pool.get_or_spawn("t1", "cat").await.unwrap();
+        let _ = pool.get_or_spawn("t2", "cat").await.unwrap();
+        let _ = pool.get_or_spawn("t3", "cat").await.unwrap();
+        assert_eq!(pool.stats().total, 3);
+
+        // Disconnect one to make it evictable
+        pool.mark_disconnected("t1");
+
+        // 4th spawn should evict the idle agent
+        let _ = pool.get_or_spawn("t4", "cat").await.unwrap();
+        assert_eq!(pool.stats().total, 3);
+        assert!(!pool.agents.contains_key("t1"), "idle agent t1 should be evicted");
+    }
+
+    #[tokio::test]
+    async fn max_agents_all_connected_fails() {
+        let mut pool = AgentPool::new(test_config()); // max_agents = 3
+
+        let _ = pool.get_or_spawn("t1", "cat").await.unwrap();
+        let _ = pool.get_or_spawn("t2", "cat").await.unwrap();
+        let _ = pool.get_or_spawn("t3", "cat").await.unwrap();
+
+        // All are connected, so 4th should fail
+        let result = pool.get_or_spawn("t4", "cat").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Agent pool is full"));
+
+        pool.shutdown_all().await;
+    }
+
+    // ── idle timeout / reap ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn reap_removes_timed_out_agents() {
+        let cfg = PoolConfig {
+            idle_timeout: Duration::from_millis(50),
+            max_agents: 10,
+            buffer_messages: false,
+            max_buffer_size: 100,
+        };
+        let mut pool = AgentPool::new(cfg);
+
+        let _ = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        pool.mark_disconnected("token_a");
+
+        // Wait for timeout
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        pool.reap_idle_agents().await;
+        assert_eq!(pool.stats().total, 0, "timed-out agent should be reaped");
+    }
+
+    #[tokio::test]
+    async fn reap_keeps_connected_agents() {
+        let cfg = PoolConfig {
+            idle_timeout: Duration::from_millis(50),
+            max_agents: 10,
+            buffer_messages: false,
+            max_buffer_size: 100,
+        };
+        let mut pool = AgentPool::new(cfg);
+
+        let _ = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        // Don't disconnect — stays connected
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        pool.reap_idle_agents().await;
+        assert_eq!(pool.stats().total, 1, "connected agent should survive reaping");
+
+        pool.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn reap_keeps_recently_disconnected() {
+        let cfg = PoolConfig {
+            idle_timeout: Duration::from_secs(60),
+            max_agents: 10,
+            buffer_messages: false,
+            max_buffer_size: 100,
+        };
+        let mut pool = AgentPool::new(cfg);
+
+        let _ = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        pool.mark_disconnected("token_a");
+
+        // Not enough time for timeout
+        pool.reap_idle_agents().await;
+        assert_eq!(pool.stats().total, 1, "recently-disconnected agent should survive");
+
+        pool.shutdown_all().await;
+    }
+
+    // ── message buffering ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn buffer_message_stores_messages() {
+        let mut pool = AgentPool::new(test_config()); // buffer_messages = true, max_buffer_size = 5
+        let _ = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        pool.mark_disconnected("token_a");
+
+        pool.buffer_message("token_a", "msg1".into());
+        pool.buffer_message("token_a", "msg2".into());
+
+        let agent = pool.agents.get("token_a").unwrap();
+        assert_eq!(agent.message_buffer.len(), 2);
+        assert_eq!(agent.message_buffer[0], "msg1");
+        assert_eq!(agent.message_buffer[1], "msg2");
+
+        pool.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn buffer_message_respects_max_size() {
+        let mut pool = AgentPool::new(test_config()); // max_buffer_size = 5
+        let _ = pool.get_or_spawn("token_a", "cat").await.unwrap();
+
+        for i in 0..10 {
+            pool.buffer_message("token_a", format!("msg{}", i));
+        }
+
+        let agent = pool.agents.get("token_a").unwrap();
+        assert_eq!(agent.message_buffer.len(), 5, "should cap at max_buffer_size");
+
+        pool.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn buffer_disabled_drops_messages() {
+        let cfg = PoolConfig {
+            buffer_messages: false,
+            ..test_config()
+        };
+        let mut pool = AgentPool::new(cfg);
+        let _ = pool.get_or_spawn("token_a", "cat").await.unwrap();
+
+        pool.buffer_message("token_a", "msg1".into());
+
+        let agent = pool.agents.get("token_a").unwrap();
+        assert!(agent.message_buffer.is_empty(), "buffering disabled, should drop");
+
+        pool.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_drains_buffer() {
+        let mut pool = AgentPool::new(test_config());
+        let _ = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        pool.mark_disconnected("token_a");
+
+        pool.buffer_message("token_a", "buffered1".into());
+        pool.buffer_message("token_a", "buffered2".into());
+
+        // Reconnect — get_or_spawn returns the buffered messages
+        let (_tx, _rx, buffered, was_reused) = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        assert!(was_reused);
+        assert_eq!(buffered.len(), 2);
+        assert_eq!(buffered[0], "buffered1");
+        assert_eq!(buffered[1], "buffered2");
+
+        // Buffer should be drained
+        let agent = pool.agents.get("token_a").unwrap();
+        assert!(agent.message_buffer.is_empty());
+
+        pool.shutdown_all().await;
+    }
+
+    // ── remove_agent / shutdown_all ──────────────────────────────────
+
+    #[tokio::test]
+    async fn remove_agent_kills_and_removes() {
+        let mut pool = AgentPool::new(test_config());
+        let _ = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        assert_eq!(pool.stats().total, 1);
+
+        pool.remove_agent("token_a").await;
+        assert_eq!(pool.stats().total, 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_all_clears_pool() {
+        let mut pool = AgentPool::new(test_config());
+        let _ = pool.get_or_spawn("t1", "cat").await.unwrap();
+        let _ = pool.get_or_spawn("t2", "cat").await.unwrap();
+        let _ = pool.get_or_spawn("t3", "cat").await.unwrap();
+        assert_eq!(pool.stats().total, 3);
+
+        pool.shutdown_all().await;
+        assert_eq!(pool.stats().total, 0);
+    }
+
+    // ── stats ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stats_reflect_pool_state() {
+        let mut pool = AgentPool::new(test_config());
+        let _ = pool.get_or_spawn("t1", "cat").await.unwrap();
+        let _ = pool.get_or_spawn("t2", "cat").await.unwrap();
+        pool.mark_disconnected("t2");
+
+        let s = pool.stats();
+        assert_eq!(s.total, 2);
+        assert_eq!(s.connected, 1);
+        assert_eq!(s.idle, 1);
+        assert_eq!(s.max, 3);
+        assert!(format!("{}", s).contains("2/3 agents"));
+
+        pool.shutdown_all().await;
+    }
+
+    // ── is_alive ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dead_agent_is_replaced_on_reconnect() {
+        let mut pool = AgentPool::new(test_config());
+        let _ = pool.get_or_spawn("token_a", "cat").await.unwrap();
+
+        // Kill the agent manually
+        pool.agents.get_mut("token_a").unwrap().kill().await;
+        // Give the process a moment to exit
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Reconnect should spawn fresh
+        let (_tx, _rx, _buf, was_reused) = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        assert!(!was_reused, "dead agent should be replaced, not reused");
+
+        pool.shutdown_all().await;
+    }
+
+    // ── start_reaper ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn reaper_task_cleans_up() {
+        let cfg = PoolConfig {
+            idle_timeout: Duration::from_millis(50),
+            max_agents: 10,
+            buffer_messages: false,
+            max_buffer_size: 100,
+        };
+        let pool = Arc::new(RwLock::new(AgentPool::new(cfg)));
+
+        // Spawn and disconnect an agent
+        {
+            let mut p = pool.write().await;
+            let _ = p.get_or_spawn("token_a", "cat").await.unwrap();
+            p.mark_disconnected("token_a");
+        }
+
+        // Start reaper with short interval
+        let handle = start_reaper(Arc::clone(&pool), Duration::from_millis(30));
+
+        // Wait for reaper to run at least once past the idle timeout
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let stats = pool.read().await.stats();
+        assert_eq!(stats.total, 0, "reaper should have cleaned up the idle agent");
+
+        handle.abort();
+    }
 }
