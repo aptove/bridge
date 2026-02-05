@@ -9,12 +9,14 @@ mod pairing;
 mod qr;
 mod rate_limiter;
 mod tls;
+mod agent_pool;
 
 use crate::cloudflare::CloudflareClient;
 use crate::bridge::StdioBridge;
 use crate::config::BridgeConfig;
 use crate::pairing::PairingManager;
 use crate::tls::TlsConfig;
+use crate::agent_pool::{AgentPool, PoolConfig};
 
 #[derive(Parser)]
 #[command(name = "bridge")]
@@ -94,6 +96,22 @@ enum Commands {
         /// Enable verbose logging (shows info level logs)
         #[arg(short, long)]
         verbose: bool,
+        
+        /// Keep agent processes alive when clients disconnect (enables session persistence)
+        #[arg(long)]
+        keep_alive: bool,
+        
+        /// Idle timeout in seconds before killing disconnected agents (default: 1800 = 30 min)
+        #[arg(long, default_value = "1800")]
+        session_timeout: u64,
+        
+        /// Maximum number of concurrent agent processes (default: 10)
+        #[arg(long, default_value = "10")]
+        max_agents: usize,
+        
+        /// Buffer agent messages while client is disconnected
+        #[arg(long)]
+        buffer_messages: bool,
     },
     
     /// Show connection QR code
@@ -199,7 +217,7 @@ async fn main() -> Result<()> {
             println!("\n🚀 Start the bridge with: bridge start --agent-command \"gemini --experimental-acp\"");
         }
         
-        Commands::Start { agent_command, port, bind, qr, stdio_proxy, no_auth, no_tls, max_connections_per_ip, max_attempts_per_minute, verbose: _ } => {
+        Commands::Start { agent_command, port, bind, qr, stdio_proxy, no_auth, no_tls, max_connections_per_ip, max_attempts_per_minute, verbose: _, keep_alive, session_timeout, max_agents, buffer_messages } => {
             info!("🌉 Starting ACP Bridge...");
             
             if no_auth {
@@ -237,22 +255,34 @@ async fn main() -> Result<()> {
                 let protocol = if tls_config.is_some() { "wss" } else { "ws" };
                 let hostname = format!("{}://{}:{}", protocol, ip, port);
 
-                let mut cfg = BridgeConfig {
-                    hostname,
-                    tunnel_id: String::new(),
-                    tunnel_secret: String::new(),
-                    client_id: String::new(),
-                    client_secret: String::new(),
-                    domain: String::new(),
-                    subdomain: String::new(),
-                    auth_token: String::new(),
-                    cert_fingerprint: tls_config.as_ref().map(|t| t.fingerprint.clone()),
+                // Try to load existing config to preserve auth_token, or create new
+                let mut cfg = if let Ok(mut existing) = BridgeConfig::load() {
+                    // Update dynamic fields but preserve auth_token
+                    existing.hostname = hostname;
+                    existing.cert_fingerprint = tls_config.as_ref().map(|t| t.fingerprint.clone());
+                    existing
+                } else {
+                    BridgeConfig {
+                        hostname,
+                        tunnel_id: String::new(),
+                        tunnel_secret: String::new(),
+                        client_id: String::new(),
+                        client_secret: String::new(),
+                        domain: String::new(),
+                        subdomain: String::new(),
+                        auth_token: String::new(),
+                        cert_fingerprint: tls_config.as_ref().map(|t| t.fingerprint.clone()),
+                    }
                 };
                 
-                // Generate and persist auth token for stdio-proxy mode
-                if !no_auth {
+                // Generate auth token if needed and persist
+                if !no_auth && cfg.auth_token.is_empty() {
                     cfg.ensure_auth_token();
+                    info!("🔑 Generated new auth token");
                 }
+                
+                // Always save config for stdio-proxy mode to persist auth_token
+                cfg.save()?;
                 
                 cfg
             } else {
@@ -301,6 +331,26 @@ async fn main() -> Result<()> {
             if let Some(tls) = tls_config {
                 info!("🔒 TLS fingerprint: {}", tls.fingerprint_short());
                 bridge = bridge.with_tls(tls);
+            }
+            
+            // Set up agent pool if keep-alive is enabled
+            if keep_alive {
+                let pool_config = PoolConfig {
+                    idle_timeout: std::time::Duration::from_secs(session_timeout),
+                    max_agents,
+                    buffer_messages,
+                    ..Default::default()
+                };
+                info!("🔄 Keep-alive enabled: timeout={}s, max_agents={}, buffer={}", 
+                    session_timeout, max_agents, buffer_messages);
+                
+                let pool = std::sync::Arc::new(tokio::sync::RwLock::new(AgentPool::new(pool_config)));
+                
+                // Start the background reaper task
+                let reaper_pool = std::sync::Arc::clone(&pool);
+                agent_pool::start_reaper(reaper_pool, std::time::Duration::from_secs(60));
+                
+                bridge = bridge.with_agent_pool(pool);
             }
             
             bridge.start().await?;

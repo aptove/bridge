@@ -6,11 +6,13 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrite
 use tokio::net::TcpListener;
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response, ErrorResponse};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::tungstenite::http::StatusCode;
 use tracing::{debug, error, info, warn};
 
+use crate::agent_pool::AgentPool;
 use crate::rate_limiter::RateLimiter;
 use crate::tls::TlsConfig;
 use crate::pairing::{PairingManager, PairingError, PairingErrorResponse};
@@ -24,6 +26,7 @@ pub struct StdioBridge {
     rate_limiter: Arc<RateLimiter>,
     tls_config: Option<Arc<TlsConfig>>,
     pairing_manager: Option<Arc<PairingManager>>,
+    agent_pool: Option<Arc<tokio::sync::RwLock<AgentPool>>>,
 }
 
 impl StdioBridge {
@@ -36,6 +39,7 @@ impl StdioBridge {
             rate_limiter: Arc::new(RateLimiter::new(3, 10)),
             tls_config: None,
             pairing_manager: None,
+            agent_pool: None,
         }
     }
 
@@ -66,6 +70,12 @@ impl StdioBridge {
     /// Enable pairing with the given manager
     pub fn with_pairing(mut self, pairing_manager: PairingManager) -> Self {
         self.pairing_manager = Some(Arc::new(pairing_manager));
+        self
+    }
+
+    /// Enable agent pool for keep-alive sessions
+    pub fn with_agent_pool(mut self, pool: Arc<tokio::sync::RwLock<AgentPool>>) -> Self {
+        self.agent_pool = Some(pool);
         self
     }
 
@@ -127,6 +137,7 @@ impl StdioBridge {
                     let rate_limiter = Arc::clone(&rate_limiter);
                     let tls_config = tls_config.clone();
                     let pairing_manager = pairing_manager.clone();
+                    let agent_pool = self.agent_pool.clone();
                     
                     tokio::spawn(async move {
                         // Register connection
@@ -136,7 +147,7 @@ impl StdioBridge {
                             // TLS connection
                             match tls.acceptor.accept(stream).await {
                                 Ok(tls_stream) => {
-                                    handle_connection_generic(tls_stream, agent_command, auth_token, pairing_manager).await
+                                    handle_connection_generic(tls_stream, agent_command, auth_token, pairing_manager, agent_pool).await
                                 }
                                 Err(e) => {
                                     warn!("🚫 TLS handshake failed: {}", e);
@@ -145,7 +156,7 @@ impl StdioBridge {
                             }
                         } else {
                             // Plain TCP connection
-                            handle_connection_generic(stream, agent_command, auth_token, pairing_manager).await
+                            handle_connection_generic(stream, agent_command, auth_token, pairing_manager, agent_pool).await
                         };
                         
                         // Always remove connection when done
@@ -173,6 +184,7 @@ async fn handle_connection_generic<S>(
     agent_command: String, 
     auth_token: Arc<Option<String>>,
     pairing_manager: Option<Arc<PairingManager>>,
+    agent_pool: Option<Arc<tokio::sync::RwLock<AgentPool>>>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -197,7 +209,7 @@ where
     let prefixed_stream = PrefixedStream::new(request_data.to_vec(), stream);
     
     // Continue with WebSocket handling
-    handle_websocket_connection(prefixed_stream, agent_command, auth_token).await
+    handle_websocket_connection(prefixed_stream, agent_command, auth_token, agent_pool).await
 }
 
 /// Handle a pairing request - validate the code and return connection details
@@ -338,43 +350,58 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<S> {
 }
 
 /// Handle WebSocket connection after initial HTTP parsing
-async fn handle_websocket_connection<S>(stream: S, agent_command: String, auth_token: Arc<Option<String>>) -> Result<()>
+async fn handle_websocket_connection<S>(stream: S, agent_command: String, auth_token: Arc<Option<String>>, agent_pool: Option<Arc<tokio::sync::RwLock<AgentPool>>>) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     // Custom callback to validate auth token during WebSocket handshake
+    // We also extract the token value for pool-based routing
     let auth_token_for_callback = Arc::clone(&auth_token);
+    let extracted_token = Arc::new(tokio::sync::Mutex::new(String::new()));
+    let extracted_token_clone = Arc::clone(&extracted_token);
+    
     let callback = move |req: &Request, response: Response| -> std::result::Result<Response, ErrorResponse> {
         if let Some(expected_token) = auth_token_for_callback.as_ref() {
             // Check for auth token in headers
-            let token_valid = req.headers()
+            let header_token = req.headers()
                 .get("X-Bridge-Token")
                 .and_then(|v| v.to_str().ok())
+                .map(|t| t.to_string());
+            
+            let token_valid = header_token.as_deref()
                 .map(|t| t == expected_token)
                 .unwrap_or(false);
             
-            // Also check query string as fallback (for clients that can't set headers)
-            let query_token_valid = if !token_valid {
+            // Also check query string as fallback
+            let query_token = if !token_valid {
                 req.uri().query()
                     .and_then(|q| {
                         q.split('&')
                             .find(|p| p.starts_with("token="))
-                            .map(|p| &p[6..])
+                            .map(|p| p[6..].to_string())
                     })
-                    .map(|t| t == expected_token)
-                    .unwrap_or(false)
             } else {
-                false
+                None
             };
             
+            let query_token_valid = query_token.as_deref()
+                .map(|t| t == expected_token)
+                .unwrap_or(false);
+            
             if !token_valid && !query_token_valid {
-                // Log is not available here since we're in a sync closure
-                // Build a 401 error response
                 let error_response = tokio_tungstenite::tungstenite::http::Response::builder()
                     .status(StatusCode::UNAUTHORIZED)
                     .body(Some("Unauthorized: invalid or missing auth token".into()))
                     .unwrap();
                 return Err(error_response);
+            }
+            
+            // Store the validated token for pool routing
+            if let Some(t) = header_token.filter(|t| t == expected_token).or(query_token.filter(|t| t == expected_token)) {
+                // We can't await here (sync closure), so use try_lock
+                if let Ok(mut guard) = extracted_token_clone.try_lock() {
+                    *guard = t;
+                }
             }
         }
         Ok(response)
@@ -395,6 +422,151 @@ where
 
     info!("✅ WebSocket connection established");
 
+    // Get the token value for pool routing
+    let client_token = extracted_token.lock().await.clone();
+    
+    // Decide whether to use pool-based or legacy handling
+    if let Some(pool) = agent_pool {
+        if client_token.is_empty() {
+            warn!("Keep-alive enabled but no auth token found, falling back to legacy mode");
+            handle_websocket_legacy(ws_stream, agent_command).await
+        } else {
+            handle_websocket_pooled(ws_stream, agent_command, client_token, pool).await
+        }
+    } else {
+        handle_websocket_legacy(ws_stream, agent_command).await
+    }
+}
+
+/// Handle WebSocket connection with agent pool (keep-alive mode)
+async fn handle_websocket_pooled<S>(
+    ws_stream: tokio_tungstenite::WebSocketStream<S>,
+    agent_command: String,
+    token: String,
+    pool: Arc<tokio::sync::RwLock<AgentPool>>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+    
+    // Get or spawn agent from pool
+    let (ws_to_agent_tx, mut agent_to_ws_rx, buffered, was_reused) = {
+        let mut pool = pool.write().await;
+        pool.get_or_spawn(&token, &agent_command).await?
+    };
+    
+    if was_reused {
+        info!("♻️  Reconnected to existing agent session");
+    } else {
+        info!("🆕 Started new agent session");
+    }
+    
+    // Replay buffered messages
+    for msg in buffered {
+        debug!("📦 Replaying buffered message: {}", msg.chars().take(200).collect::<String>());
+        if let Err(e) = ws_sender.send(Message::Text(msg)).await {
+            error!("Failed to replay buffered message: {}", e);
+        }
+    }
+    
+    // Create shutdown channel
+    let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+    
+    // Task 1: WebSocket → Agent (via channel)
+    let ws_to_agent_tx_clone = ws_to_agent_tx.clone();
+    let mut ws_to_agent = tokio::spawn(async move {
+        while let Some(msg_result) = ws_receiver.next().await {
+            match msg_result {
+                Ok(msg) => {
+                    if msg.is_text() || msg.is_binary() {
+                        let data = msg.into_data();
+                        let text = String::from_utf8_lossy(&data).to_string();
+                        debug!("📥 Received from Mobile ({} bytes): {}", data.len(), 
+                            text.chars().take(200).collect::<String>());
+                        
+                        if ws_to_agent_tx_clone.send(text).await.is_err() {
+                            error!("Failed to send to agent channel");
+                            break;
+                        }
+                        debug!("✅ Forwarded to agent");
+                    } else if msg.is_close() {
+                        info!("📱 Client closed connection");
+                        break;
+                    }
+                }
+                Err(e) => {
+                    error!("WebSocket receive error: {}", e);
+                    break;
+                }
+            }
+        }
+        debug!("WebSocket receiver task ended");
+    });
+    
+    // Task 2: Agent → WebSocket (via broadcast channel)
+    let shutdown_tx_clone = shutdown_tx.clone();
+    let token_for_buffer = token.clone();
+    let pool_for_buffer = Arc::clone(&pool);
+    let agent_to_ws = tokio::spawn(async move {
+        loop {
+            match agent_to_ws_rx.recv().await {
+                Ok(line) => {
+                    debug!("📤 Sending to Mobile ({} bytes): {}", line.len(), 
+                        line.chars().take(200).collect::<String>());
+                    
+                    if let Err(e) = ws_sender.send(Message::Text(line.clone())).await {
+                        debug!("Client disconnected, buffering message: {}", e);
+                        let mut pool = pool_for_buffer.write().await;
+                        pool.buffer_message(&token_for_buffer, line);
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("Agent-to-WS receiver lagged, skipped {} messages", n);
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    debug!("Agent broadcast channel closed (agent exited)");
+                    break;
+                }
+            }
+        }
+        
+        debug!("Agent-to-WS forwarder task ended");
+        let _ = shutdown_tx_clone.send(()).await;
+    });
+    
+    // Wait for either task to finish
+    tokio::select! {
+        _ = &mut ws_to_agent => {
+            debug!("WS-to-agent task completed first");
+        }
+        _ = shutdown_rx.recv() => {
+            debug!("Agent-to-WS task completed first");
+        }
+    }
+    
+    info!("💤 Client disconnected, agent stays alive in pool");
+    
+    // Abort forwarding tasks - agent process stays alive
+    ws_to_agent.abort();
+    agent_to_ws.abort();
+    
+    // Mark agent as disconnected in pool (don't kill it)
+    {
+        let mut pool = pool.write().await;
+        pool.mark_disconnected(&token);
+    }
+    
+    Ok(())
+}
+
+/// Handle WebSocket connection in legacy mode (kill-on-drop, no pool)
+async fn handle_websocket_legacy<S>(ws_stream: tokio_tungstenite::WebSocketStream<S>, agent_command: String) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
     // Parse the agent command
