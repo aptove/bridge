@@ -36,7 +36,7 @@ impl StdioBridge {
             port,
             bind_addr: "0.0.0.0".to_string(),
             auth_token: None,
-            rate_limiter: Arc::new(RateLimiter::new(3, 10)),
+            rate_limiter: Arc::new(RateLimiter::new(10, 30)),
             tls_config: None,
             pairing_manager: None,
             agent_pool: None,
@@ -662,25 +662,48 @@ async fn handle_create_session_intercept<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    // Read the next message from the client (should be `createSession`)
-    let msg = match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        ws_receiver.next(),
-    ).await {
-        Ok(Some(Ok(msg))) if msg.is_text() || msg.is_binary() => {
-            String::from_utf8_lossy(&msg.into_data()).to_string()
+    // The ACP protocol flow after initialize is:
+    //   Client → notifications/initialized (notification, no id)
+    //   Client → createSession (request)
+    // We need to skip any notifications before finding createSession.
+    let mut request: serde_json::Value;
+    let max_skip = 5; // safety limit to avoid infinite loop
+    let mut skipped = 0;
+    
+    loop {
+        let msg = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            ws_receiver.next(),
+        ).await {
+            Ok(Some(Ok(msg))) if msg.is_text() || msg.is_binary() => {
+                String::from_utf8_lossy(&msg.into_data()).to_string()
+            }
+            _ => return false,
+        };
+        
+        request = match serde_json::from_str(&msg) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        
+        let method = request.get("method").and_then(|m| m.as_str());
+        
+        if method == Some("createSession") {
+            break; // found it
         }
-        _ => return false,
-    };
-    
-    // Parse it as JSON-RPC to check if it's a `createSession` request
-    let request: serde_json::Value = match serde_json::from_str(&msg) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    
-    let method = request.get("method").and_then(|m| m.as_str());
-    if method != Some("createSession") {
+        
+        // If it's a notification (has method but no id), skip it
+        if method.is_some() && request.get("id").is_none() {
+            info!("📨 Skipping notification during session intercept: {:?}", method);
+            skipped += 1;
+            if skipped >= max_skip {
+                warn!("⚠️  Too many notifications before createSession, giving up");
+                return false;
+            }
+            continue;
+        }
+        
+        // It's some other request, not createSession — can't intercept
         debug!("Message is not createSession (method={:?}), cannot intercept", method);
         return false;
     }
