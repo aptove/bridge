@@ -451,7 +451,7 @@ where
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
     
     // Get or spawn agent from pool
-    let (ws_to_agent_tx, mut agent_to_ws_rx, buffered, was_reused, cached_init) = {
+    let (ws_to_agent_tx, mut agent_to_ws_rx, buffered, was_reused, cached_init, cached_session) = {
         let mut pool = pool.write().await;
         pool.get_or_spawn(&token, &agent_command).await?
     };
@@ -487,6 +487,21 @@ where
             }
         } else {
             debug!("No cached initialize response, first connection will capture it");
+        }
+        
+        // Also intercept createSession to reuse the same session ID
+        if let Some(ref cached) = cached_session {
+            info!("🔄 Intercepting createSession for session resumption");
+            let session_handled = handle_create_session_intercept(
+                &mut ws_receiver, &mut ws_sender, cached
+            ).await;
+            if session_handled {
+                info!("✅ createSession intercepted, reusing existing session");
+            } else {
+                warn!("⚠️  Next message was not createSession, proceeding normally");
+            }
+        } else {
+            debug!("No cached createSession response, first connection will capture it");
         }
     }
     
@@ -536,6 +551,7 @@ where
     let pool_for_buffer = Arc::clone(&pool);
     let agent_to_ws = tokio::spawn(async move {
         let mut init_captured = false;
+        let mut session_captured = false;
         loop {
             match agent_to_ws_rx.recv().await {
                 Ok(line) => {
@@ -546,6 +562,16 @@ where
                             let mut pool = pool_for_capture.write().await;
                             pool.cache_init_response(&token_for_capture, line.clone());
                             init_captured = true;
+                        }
+                    }
+                    
+                    // On first connection, capture the createSession response
+                    if needs_init_capture && !session_captured {
+                        if is_create_session_response(&line) {
+                            info!("📋 Captured createSession response for future reconnections");
+                            let mut pool = pool_for_capture.write().await;
+                            pool.cache_session_response(&token_for_capture, line.clone());
+                            session_captured = true;
                         }
                     }
                     
@@ -610,6 +636,84 @@ fn is_initialize_response(msg: &str) -> bool {
     } else {
         false
     }
+}
+
+/// Check if a JSON-RPC message is a `createSession` response (has "result" with "sessionId")
+fn is_create_session_response(msg: &str) -> bool {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg) {
+        // It's a response (has "result") and the result contains a sessionId
+        if let Some(result) = v.get("result") {
+            result.get("sessionId").is_some()
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+/// Intercept the client's `createSession` request and reply with a cached response.
+/// Returns true if a createSession was intercepted, false otherwise.
+async fn handle_create_session_intercept<S>(
+    ws_receiver: &mut futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<S>>,
+    ws_sender: &mut futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<S>, Message>,
+    cached_response: &str,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    // Read the next message from the client (should be `createSession`)
+    let msg = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        ws_receiver.next(),
+    ).await {
+        Ok(Some(Ok(msg))) if msg.is_text() || msg.is_binary() => {
+            String::from_utf8_lossy(&msg.into_data()).to_string()
+        }
+        _ => return false,
+    };
+    
+    // Parse it as JSON-RPC to check if it's a `createSession` request
+    let request: serde_json::Value = match serde_json::from_str(&msg) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    
+    let method = request.get("method").and_then(|m| m.as_str());
+    if method != Some("createSession") {
+        debug!("Message is not createSession (method={:?}), cannot intercept", method);
+        return false;
+    }
+    
+    // Extract the request ID so we can match it in the response
+    let request_id = match request.get("id") {
+        Some(id) => id.clone(),
+        None => return false,
+    };
+    
+    info!("🔄 Intercepting createSession request (id={})", request_id);
+    
+    // Parse the cached response and replace its "id" with the new request's "id"
+    let mut cached: serde_json::Value = match serde_json::from_str(cached_response) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Failed to parse cached createSession response: {}", e);
+            return false;
+        }
+    };
+    
+    cached["id"] = request_id;
+    
+    let response_str = serde_json::to_string(&cached).unwrap_or_default();
+    debug!("🔄 Sending cached createSession response ({} bytes): {}", response_str.len(),
+        response_str.chars().take(200).collect::<String>());
+    
+    if let Err(e) = ws_sender.send(Message::Text(response_str)).await {
+        error!("Failed to send cached createSession response: {}", e);
+        return false;
+    }
+    
+    true
 }
 
 /// Intercept the client's `initialize` request and reply with a cached response.
