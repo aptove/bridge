@@ -688,7 +688,8 @@ where
         
         let method = request.get("method").and_then(|m| m.as_str());
         
-        if method == Some("createSession") {
+        // ACP uses "session/new" (not "createSession")
+        if method == Some("session/new") {
             break; // found it
         }
         
@@ -704,7 +705,9 @@ where
         }
         
         // It's some other request, not createSession — can't intercept
-        debug!("Message is not createSession (method={:?}), cannot intercept", method);
+        warn!("⚠️  Message is not createSession (method={:?}, has_id={}, raw={}), cannot intercept", 
+            method, request.get("id").is_some(), 
+            msg.chars().take(200).collect::<String>());
         return false;
     }
     
