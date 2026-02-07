@@ -10,6 +10,7 @@ mod qr;
 mod rate_limiter;
 mod tls;
 mod agent_pool;
+mod push;
 
 use crate::cloudflare::CloudflareClient;
 use crate::bridge::StdioBridge;
@@ -17,6 +18,7 @@ use crate::config::BridgeConfig;
 use crate::pairing::PairingManager;
 use crate::tls::TlsConfig;
 use crate::agent_pool::{AgentPool, PoolConfig};
+use crate::push::PushRelayClient;
 
 #[derive(Parser)]
 #[command(name = "bridge")]
@@ -112,6 +114,11 @@ enum Commands {
         /// Buffer agent messages while client is disconnected
         #[arg(long)]
         buffer_messages: bool,
+
+        /// Push relay URL for sending push notifications to mobile devices
+        /// when the client is disconnected (e.g., https://push-relay.example.workers.dev)
+        #[arg(long)]
+        push_relay_url: Option<String>,
     },
     
     /// Show connection QR code
@@ -217,7 +224,7 @@ async fn main() -> Result<()> {
             println!("\n🚀 Start the bridge with: bridge start --agent-command \"gemini --experimental-acp\"");
         }
         
-        Commands::Start { agent_command, port, bind, qr, stdio_proxy, no_auth, no_tls, max_connections_per_ip, max_attempts_per_minute, verbose: _, keep_alive, session_timeout, max_agents, buffer_messages } => {
+        Commands::Start { agent_command, port, bind, qr, stdio_proxy, no_auth, no_tls, max_connections_per_ip, max_attempts_per_minute, verbose: _, keep_alive, session_timeout, max_agents, buffer_messages, push_relay_url } => {
             info!("🌉 Starting ACP Bridge...");
             
             if no_auth {
@@ -333,6 +340,18 @@ async fn main() -> Result<()> {
                 bridge = bridge.with_tls(tls);
             }
             
+            // Set up push relay client if configured
+            if let Some(ref relay_url) = push_relay_url {
+                let push_client = PushRelayClient::new(
+                    relay_url.clone(),
+                    config.auth_token.clone(),
+                );
+                info!("🔔 Push notifications enabled via relay: {}", relay_url);
+                bridge = bridge.with_push_relay(push_client);
+            } else {
+                info!("🔕 Push notifications disabled (no --push-relay-url)");
+            }
+
             // Set up agent pool if keep-alive is enabled
             if keep_alive {
                 let pool_config = PoolConfig {

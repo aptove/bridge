@@ -16,6 +16,7 @@ use crate::agent_pool::AgentPool;
 use crate::rate_limiter::RateLimiter;
 use crate::tls::TlsConfig;
 use crate::pairing::{PairingManager, PairingError, PairingErrorResponse};
+use crate::push::PushRelayClient;
 
 /// Bridge between stdio-based ACP agents and WebSocket clients
 pub struct StdioBridge {
@@ -27,6 +28,7 @@ pub struct StdioBridge {
     tls_config: Option<Arc<TlsConfig>>,
     pairing_manager: Option<Arc<PairingManager>>,
     agent_pool: Option<Arc<tokio::sync::RwLock<AgentPool>>>,
+    push_relay: Option<Arc<PushRelayClient>>,
 }
 
 impl StdioBridge {
@@ -40,6 +42,7 @@ impl StdioBridge {
             tls_config: None,
             pairing_manager: None,
             agent_pool: None,
+            push_relay: None,
         }
     }
 
@@ -76,6 +79,12 @@ impl StdioBridge {
     /// Enable agent pool for keep-alive sessions
     pub fn with_agent_pool(mut self, pool: Arc<tokio::sync::RwLock<AgentPool>>) -> Self {
         self.agent_pool = Some(pool);
+        self
+    }
+
+    /// Enable push notifications via relay
+    pub fn with_push_relay(mut self, client: PushRelayClient) -> Self {
+        self.push_relay = Some(Arc::new(client));
         self
     }
 
@@ -138,6 +147,7 @@ impl StdioBridge {
                     let tls_config = tls_config.clone();
                     let pairing_manager = pairing_manager.clone();
                     let agent_pool = self.agent_pool.clone();
+                    let push_relay = self.push_relay.clone();
                     
                     tokio::spawn(async move {
                         // Register connection
@@ -147,7 +157,7 @@ impl StdioBridge {
                             // TLS connection
                             match tls.acceptor.accept(stream).await {
                                 Ok(tls_stream) => {
-                                    handle_connection_generic(tls_stream, agent_command, auth_token, pairing_manager, agent_pool).await
+                                    handle_connection_generic(tls_stream, agent_command, auth_token, pairing_manager, agent_pool, push_relay).await
                                 }
                                 Err(e) => {
                                     warn!("🚫 TLS handshake failed: {}", e);
@@ -156,7 +166,7 @@ impl StdioBridge {
                             }
                         } else {
                             // Plain TCP connection
-                            handle_connection_generic(stream, agent_command, auth_token, pairing_manager, agent_pool).await
+                            handle_connection_generic(stream, agent_command, auth_token, pairing_manager, agent_pool, push_relay).await
                         };
                         
                         // Always remove connection when done
@@ -185,6 +195,7 @@ async fn handle_connection_generic<S>(
     auth_token: Arc<Option<String>>,
     pairing_manager: Option<Arc<PairingManager>>,
     agent_pool: Option<Arc<tokio::sync::RwLock<AgentPool>>>,
+    push_relay: Option<Arc<PushRelayClient>>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -209,7 +220,7 @@ where
     let prefixed_stream = PrefixedStream::new(request_data.to_vec(), stream);
     
     // Continue with WebSocket handling
-    handle_websocket_connection(prefixed_stream, agent_command, auth_token, agent_pool).await
+    handle_websocket_connection(prefixed_stream, agent_command, auth_token, agent_pool, push_relay).await
 }
 
 /// Handle a pairing request - validate the code and return connection details
@@ -350,7 +361,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<S> {
 }
 
 /// Handle WebSocket connection after initial HTTP parsing
-async fn handle_websocket_connection<S>(stream: S, agent_command: String, auth_token: Arc<Option<String>>, agent_pool: Option<Arc<tokio::sync::RwLock<AgentPool>>>) -> Result<()>
+async fn handle_websocket_connection<S>(stream: S, agent_command: String, auth_token: Arc<Option<String>>, agent_pool: Option<Arc<tokio::sync::RwLock<AgentPool>>>, push_relay: Option<Arc<PushRelayClient>>) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -429,12 +440,12 @@ where
     if let Some(pool) = agent_pool {
         if client_token.is_empty() {
             warn!("Keep-alive enabled but no auth token found, falling back to legacy mode");
-            handle_websocket_legacy(ws_stream, agent_command).await
+            handle_websocket_legacy(ws_stream, agent_command, push_relay).await
         } else {
-            handle_websocket_pooled(ws_stream, agent_command, client_token, pool).await
+            handle_websocket_pooled(ws_stream, agent_command, client_token, pool, push_relay).await
         }
     } else {
-        handle_websocket_legacy(ws_stream, agent_command).await
+        handle_websocket_legacy(ws_stream, agent_command, push_relay).await
     }
 }
 
@@ -444,6 +455,7 @@ async fn handle_websocket_pooled<S>(
     agent_command: String,
     token: String,
     pool: Arc<tokio::sync::RwLock<AgentPool>>,
+    push_relay: Option<Arc<PushRelayClient>>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -516,6 +528,7 @@ where
     
     // Task 1: WebSocket → Agent (via channel)
     let ws_to_agent_tx_clone = ws_to_agent_tx.clone();
+    let push_relay_for_register = push_relay.clone();
     let mut ws_to_agent = tokio::spawn(async move {
         while let Some(msg_result) = ws_receiver.next().await {
             match msg_result {
@@ -525,6 +538,49 @@ where
                         let text = String::from_utf8_lossy(&data).to_string();
                         debug!("📥 Received from Mobile ({} bytes): {}", data.len(), 
                             text.chars().take(200).collect::<String>());
+                        
+                        // Intercept bridge/registerPushToken notifications
+                        if let Some(ref relay) = push_relay_for_register {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                                let method = v.get("method").and_then(|m| m.as_str());
+                                if method == Some("bridge/registerPushToken") {
+                                    if let Some(params) = v.get("params") {
+                                        let platform = params.get("platform").and_then(|p| p.as_str()).unwrap_or("");
+                                        let device_token = params.get("deviceToken").and_then(|t| t.as_str()).unwrap_or("");
+                                        let bundle_id = params.get("bundleId").and_then(|b| b.as_str()).unwrap_or("");
+                                        info!("📲 Registering push token: platform={}, bundle_id={}", platform, bundle_id);
+                                        let relay = Arc::clone(relay);
+                                        let platform = platform.to_string();
+                                        let device_token = device_token.to_string();
+                                        let bundle_id = bundle_id.to_string();
+                                        tokio::spawn(async move {
+                                            if let Err(e) = relay.register_device(&platform, &device_token, Some(&bundle_id)).await {
+                                                error!("Failed to register push token: {}", e);
+                                            } else {
+                                                info!("✅ Push token registered successfully");
+                                            }
+                                        });
+                                    }
+                                    // Don't forward bridge-specific messages to agent
+                                    continue;
+                                }
+                                // Also handle unregisterPushToken
+                                if method == Some("bridge/unregisterPushToken") {
+                                    if let Some(params) = v.get("params") {
+                                        let device_token = params.get("deviceToken").and_then(|t| t.as_str()).unwrap_or("");
+                                        info!("📲 Unregistering push token");
+                                        let relay = Arc::clone(relay);
+                                        let device_token = device_token.to_string();
+                                        tokio::spawn(async move {
+                                            if let Err(e) = relay.unregister_device(&device_token).await {
+                                                error!("Failed to unregister push token: {}", e);
+                                            }
+                                        });
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
                         
                         if ws_to_agent_tx_clone.send(text).await.is_err() {
                             error!("Failed to send to agent channel");
@@ -582,6 +638,15 @@ where
                         debug!("Client disconnected, buffering message: {}", e);
                         let mut pool = pool_for_buffer.write().await;
                         pool.buffer_message(&token_for_buffer, line);
+                        // Send push notification since client is disconnected
+                        if let Some(ref relay) = push_relay {
+                            let relay = Arc::clone(relay);
+                            tokio::spawn(async move {
+                                if let Err(e) = relay.notify("Agent").await {
+                                    debug!("Push notification failed: {}", e);
+                                }
+                            });
+                        }
                         break;
                     }
                 }
@@ -807,7 +872,7 @@ where
 
 
 /// Handle WebSocket connection in legacy mode (kill-on-drop, no pool)
-async fn handle_websocket_legacy<S>(ws_stream: tokio_tungstenite::WebSocketStream<S>, agent_command: String) -> Result<()>
+async fn handle_websocket_legacy<S>(ws_stream: tokio_tungstenite::WebSocketStream<S>, agent_command: String, _push_relay: Option<Arc<PushRelayClient>>) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
