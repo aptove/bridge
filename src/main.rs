@@ -116,8 +116,8 @@ enum Commands {
         buffer_messages: bool,
 
         /// Push relay URL for sending push notifications to mobile devices
-        /// when the client is disconnected (e.g., https://push-relay.example.workers.dev)
-        #[arg(long)]
+        /// when the client is disconnected
+        #[arg(long, default_value = "https://push.oss.aptov.com")]
         push_relay_url: Option<String>,
     },
     
