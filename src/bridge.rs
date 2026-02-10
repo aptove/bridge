@@ -501,19 +501,19 @@ where
             debug!("No cached initialize response, first connection will capture it");
         }
         
-        // Also intercept createSession to reuse the same session ID
+        // Also intercept session requests (session/new or session/load) to reuse the same session ID
         if let Some(ref cached) = cached_session {
-            info!("🔄 Intercepting createSession for session resumption");
+            info!("🔄 Intercepting session request for session resumption");
             let session_handled = handle_create_session_intercept(
                 &mut ws_receiver, &mut ws_sender, cached
             ).await;
             if session_handled {
-                info!("✅ createSession intercepted, reusing existing session");
+                info!("✅ Session request intercepted, reusing existing session");
             } else {
-                warn!("⚠️  Next message was not createSession, proceeding normally");
+                warn!("⚠️  Next message was not a session request, proceeding normally");
             }
         } else {
-            debug!("No cached createSession response, first connection will capture it");
+            debug!("No cached session response, first connection will capture it");
         }
     }
     
@@ -690,14 +690,17 @@ where
     Ok(())
 }
 
-/// Check if a JSON-RPC message is an `initialize` response (has "result" with "capabilities")
+/// Check if a JSON-RPC message is an `initialize` response.
+/// Supports both MCP-style (capabilities, serverInfo) and ACP-style (agentCapabilities, agentInfo, protocolVersion) responses.
 fn is_initialize_response(msg: &str) -> bool {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg) {
-        // It's a response (has "result") and the result contains agent capabilities
+        // It's a response (has "result") and the result contains agent/server capabilities
         v.get("result").is_some()
             && (v["result"].get("capabilities").is_some()
                 || v["result"].get("serverInfo").is_some()
-                || v["result"].get("agentInfo").is_some())
+                || v["result"].get("agentInfo").is_some()
+                || v["result"].get("agentCapabilities").is_some()
+                || v["result"].get("protocolVersion").is_some())
     } else {
         false
     }
@@ -729,8 +732,8 @@ where
 {
     // The ACP protocol flow after initialize is:
     //   Client → notifications/initialized (notification, no id)
-    //   Client → createSession (request)
-    // We need to skip any notifications before finding createSession.
+    //   Client → session/new (request) OR session/load (request for reconnection)
+    // We need to skip any notifications before finding the session request.
     let mut request: serde_json::Value;
     let max_skip = 5; // safety limit to avoid infinite loop
     let mut skipped = 0;
@@ -753,8 +756,8 @@ where
         
         let method = request.get("method").and_then(|m| m.as_str());
         
-        // ACP uses "session/new" (not "createSession")
-        if method == Some("session/new") {
+        // Accept both session/new (new session) and session/load (resume session)
+        if method == Some("session/new") || method == Some("session/load") {
             break; // found it
         }
         
@@ -763,14 +766,46 @@ where
             info!("📨 Skipping notification during session intercept: {:?}", method);
             skipped += 1;
             if skipped >= max_skip {
-                warn!("⚠️  Too many notifications before createSession, giving up");
+                warn!("⚠️  Too many notifications before session request, giving up");
                 return false;
             }
             continue;
         }
         
-        // It's some other request, not createSession — can't intercept
-        warn!("⚠️  Message is not createSession (method={:?}, has_id={}, raw={}), cannot intercept", 
+        // If it's an initialize request, respond with a minimal ACP initialize response
+        // and continue looking for session/new. This happens when cached_init was None
+        // (e.g., agent's initialize response format wasn't recognized on first connection).
+        if method == Some("initialize") {
+            if let Some(req_id) = request.get("id") {
+                info!("📨 Handling uncached initialize during session intercept (id={})", req_id);
+                let init_response = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "protocolVersion": 1,
+                        "agentCapabilities": {},
+                        "agentInfo": {
+                            "name": "bridge",
+                            "version": "1.0.0"
+                        }
+                    }
+                });
+                let resp_str = serde_json::to_string(&init_response).unwrap_or_default();
+                if let Err(e) = ws_sender.send(Message::Text(resp_str)).await {
+                    error!("Failed to send synthetic initialize response: {}", e);
+                    return false;
+                }
+                skipped += 1;
+                if skipped >= max_skip {
+                    warn!("⚠️  Too many messages before session request, giving up");
+                    return false;
+                }
+                continue;
+            }
+        }
+        
+        // It's some other request, not a session request — can't intercept
+        warn!("⚠️  Message is not session/new or session/load (method={:?}, has_id={}, raw={}), cannot intercept", 
             method, request.get("id").is_some(), 
             msg.chars().take(200).collect::<String>());
         return false;
@@ -782,13 +817,14 @@ where
         None => return false,
     };
     
-    info!("🔄 Intercepting createSession request (id={})", request_id);
+    let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("unknown");
+    info!("🔄 Intercepting {} request (id={})", method, request_id);
     
     // Parse the cached response and replace its "id" with the new request's "id"
     let mut cached: serde_json::Value = match serde_json::from_str(cached_response) {
         Ok(v) => v,
         Err(e) => {
-            error!("Failed to parse cached createSession response: {}", e);
+            error!("Failed to parse cached session response: {}", e);
             return false;
         }
     };
@@ -796,11 +832,11 @@ where
     cached["id"] = request_id;
     
     let response_str = serde_json::to_string(&cached).unwrap_or_default();
-    debug!("🔄 Sending cached createSession response ({} bytes): {}", response_str.len(),
+    debug!("🔄 Sending cached session response ({} bytes): {}", response_str.len(),
         response_str.chars().take(200).collect::<String>());
     
     if let Err(e) = ws_sender.send(Message::Text(response_str)).await {
-        error!("Failed to send cached createSession response: {}", e);
+        error!("Failed to send cached session response: {}", e);
         return false;
     }
     

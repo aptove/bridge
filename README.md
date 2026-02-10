@@ -147,6 +147,19 @@ Default locations (can be overridden with `--config-dir`):
 Example with custom config directory:
 ```bash
 ./target/release/bridge --config-dir ./my-config start --agent-command "copilot --acp" --qr
+
+echo '{"model": "sonnet"}' > ~/.claude/settings.json
+
+# Then run bridge
+export ANTHROPIC_API_KEY=sk-ant-your-key
+./target/release/bridge start \
+  --agent-command "claude-code-acp" \
+  --port 8080 \
+  --stdio-proxy \
+  --qr \
+  --keep-alive \
+  --verbose \
+  --session-timeout 3600
 ```
 
 ## Development
