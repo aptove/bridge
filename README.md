@@ -140,13 +140,44 @@ Sessions are isolated by auth token with idle timeouts and max-agent limits. See
 
 ## Config Location
 
-Default locations (can be overridden with `--config-dir`):
-- **macOS**: `~/Library/Application Support/com.bridge.bridge/`
-- **Linux**: `~/.config/bridge/`
+The bridge stores configuration in `config.json` which includes:
+- TLS certificate fingerprint
+- Authentication token (relay token)
+- Connection settings
 
-Example with custom config directory:
+### Default Paths
+
+Determined by the `directories` crate with package identifier `com.bridge.bridge`:
+
+- **macOS**: `~/Library/Application Support/com.bridge.bridge/config.json`
+- **Linux**: `~/.config/bridge/config.json`
+- **Windows**: `%APPDATA%\bridge\bridge\config\config.json`
+
+### Custom Location
+
+Override with `--config-dir`:
 ```bash
 ./target/release/bridge --config-dir ./my-config start --agent-command "copilot --acp" --qr
+```
+
+### Rotating Credentials
+
+To generate a new relay token and invalidate old device registrations:
+
+```bash
+# Delete config file
+rm -f ~/Library/Application\ Support/com.bridge.bridge/config.json  # macOS
+rm -f ~/.config/bridge/config.json                                   # Linux
+
+# Restart bridge - generates new token
+./target/release/bridge start --agent-command "copilot --acp" --qr --verbose
+```
+
+The new relay token will be printed with `--verbose` mode.
+
+**Note**: Deleting the config also regenerates TLS certificates, requiring device re-pairing.
+
+## Claude Code Integration
 
 echo '{"model": "sonnet"}' > ~/.claude/settings.json
 
