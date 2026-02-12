@@ -224,7 +224,7 @@ async fn main() -> Result<()> {
             println!("\n🚀 Start the bridge with: bridge start --agent-command \"gemini --experimental-acp\"");
         }
         
-        Commands::Start { agent_command, port, bind, qr, stdio_proxy, no_auth, no_tls, max_connections_per_ip, max_attempts_per_minute, verbose: _, keep_alive, session_timeout, max_agents, buffer_messages, push_relay_url } => {
+        Commands::Start { agent_command, port, bind, qr, stdio_proxy, no_auth, no_tls, max_connections_per_ip, max_attempts_per_minute, verbose, keep_alive, session_timeout, max_agents, buffer_messages, push_relay_url } => {
             info!("🌉 Starting ACP Bridge...");
             
             if no_auth {
@@ -286,6 +286,11 @@ async fn main() -> Result<()> {
                 if !no_auth && cfg.auth_token.is_empty() {
                     cfg.ensure_auth_token();
                     info!("🔑 Generated new auth token");
+                    if verbose {
+                        println!("🔐 Relay Token (for Bruno/testing): {}", cfg.auth_token);
+                    }
+                } else if verbose && !no_auth {
+                    println!("🔐 Relay Token (for Bruno/testing): {}", cfg.auth_token);
                 }
                 
                 // Always save config for stdio-proxy mode to persist auth_token
@@ -299,6 +304,11 @@ async fn main() -> Result<()> {
                     cfg.ensure_auth_token();
                     cfg.save()?;
                     info!("🔑 Generated new auth token and saved to config");
+                    if verbose {
+                        println!("🔐 Relay Token (for Bruno/testing): {}", cfg.auth_token);
+                    }
+                } else if verbose && !no_auth {
+                    println!("🔐 Relay Token (for Bruno/testing): {}", cfg.auth_token);
                 }
                 cfg
             };
