@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::sync::Arc;
 use tracing::{info, error, warn};
 
 mod cloudflare;
@@ -351,16 +352,17 @@ async fn main() -> Result<()> {
             }
             
             // Set up push relay client if configured
-            if let Some(ref relay_url) = push_relay_url {
-                let push_client = PushRelayClient::new(
+            let push_client = if let Some(ref relay_url) = push_relay_url {
+                let client = PushRelayClient::new(
                     relay_url.clone(),
                     config.auth_token.clone(),
                 );
                 info!("🔔 Push notifications enabled via relay: {}", relay_url);
-                bridge = bridge.with_push_relay(push_client);
+                Some(Arc::new(client))
             } else {
                 info!("🔕 Push notifications disabled (no --push-relay-url)");
-            }
+                None
+            };
 
             // Set up agent pool if keep-alive is enabled
             if keep_alive {
@@ -373,13 +375,26 @@ async fn main() -> Result<()> {
                 info!("🔄 Keep-alive enabled: timeout={}s, max_agents={}, buffer={}", 
                     session_timeout, max_agents, buffer_messages);
                 
-                let pool = std::sync::Arc::new(tokio::sync::RwLock::new(AgentPool::new(pool_config)));
+                let mut pool = AgentPool::new(pool_config);
+                
+                // Wire push relay into agent pool for notification triggers
+                if let Some(ref push_relay) = push_client {
+                    pool = pool.with_push_relay(Arc::clone(push_relay));
+                    info!("🔔 Push notifications wired into agent pool");
+                }
+                
+                let pool = std::sync::Arc::new(tokio::sync::RwLock::new(pool));
                 
                 // Start the background reaper task
                 let reaper_pool = std::sync::Arc::clone(&pool);
                 agent_pool::start_reaper(reaper_pool, std::time::Duration::from_secs(60));
                 
                 bridge = bridge.with_agent_pool(pool);
+            }
+            
+            // Wire push relay into bridge for registration handlers
+            if let Some(push_relay) = push_client {
+                bridge = bridge.with_push_relay((*push_relay).clone());
             }
             
             bridge.start().await?;

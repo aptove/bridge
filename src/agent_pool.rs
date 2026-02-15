@@ -8,6 +8,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 
+use crate::push::PushRelayClient;
+
 /// Configuration for the agent pool
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
@@ -89,6 +91,7 @@ impl PooledAgent {
 pub struct AgentPool {
     pub(crate) agents: HashMap<String, PooledAgent>,
     config: PoolConfig,
+    push_relay: Option<Arc<PushRelayClient>>,
 }
 
 impl AgentPool {
@@ -96,7 +99,14 @@ impl AgentPool {
         Self {
             agents: HashMap::new(),
             config,
+            push_relay: None,
         }
+    }
+
+    /// Set the push relay client for sending notifications
+    pub fn with_push_relay(mut self, push_relay: Arc<PushRelayClient>) -> Self {
+        self.push_relay = Some(push_relay);
+        self
     }
 
     /// Get an existing agent or spawn a new one for the given token.
@@ -213,6 +223,8 @@ impl AgentPool {
         // Background task: forward agent stdout to broadcast channel
         let stdout_tx = agent_to_ws_tx.clone();
         let stdout_reader = BufReader::new(stdout);
+        let push_relay_for_stdout: Option<Arc<PushRelayClient>> = self.push_relay.clone();
+        let agent_token_for_push = token.to_string();
         tokio::spawn(async move {
             let mut lines = stdout_reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -221,9 +233,23 @@ impl AgentPool {
                     line.len(),
                     line.chars().take(200).collect::<String>()
                 );
-                // broadcast::send only fails if there are no receivers,
-                // which is fine when no client is connected
-                let _ = stdout_tx.send(line);
+                
+                // Attempt to send to broadcast channel
+                match stdout_tx.send(line) {
+                    Ok(_) => {
+                        // Message was sent successfully (has at least one receiver)
+                        debug!("Agent output sent to connected client");
+                    }
+                    Err(_) => {
+                        // No receivers = no WebSocket client connected
+                        if let Some(ref push_relay) = push_relay_for_stdout {
+                            debug!("Agent output with no connected client, triggering push notification");
+                            if let Err(e) = push_relay.notify(&agent_token_for_push).await {
+                                warn!("Failed to send push notification: {}", e);
+                            }
+                        }
+                    }
+                }
             }
             debug!("Pooled agent stdout reader task ended");
         });
