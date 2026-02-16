@@ -1000,18 +1000,20 @@ where
     let stdout_reader = BufReader::new(stdout);
     let agent_to_ws = tokio::spawn(async move {
         let mut lines = stdout_reader.lines();
-        
+        info!("📖 Agent stdout reader task started");
+
         while let Ok(Some(line)) = lines.next_line().await {
-            debug!("📤 Sending to Mobile ({} bytes): {}", line.len(), 
+            info!("📤 Agent -> Mobile ({} bytes): {}", line.len(),
                 line.chars().take(200).collect::<String>());
-            
+
             if let Err(e) = ws_sender.send(Message::Text(line)).await {
                 error!("Failed to send to WebSocket: {}", e);
                 break;
             }
+            info!("✅ Message sent to WebSocket successfully");
         }
-        
-        debug!("Agent stdout reader task ended");
+
+        info!("Agent stdout reader task ended");
         let _ = shutdown_tx_clone.send(()).await;
     });
 
