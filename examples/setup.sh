@@ -20,3 +20,23 @@ cargo run --release -- start \
   --agent-command "gemini --experimental-acp" \
   --cloudflare \
   --qr
+
+# ─────────────────────────────────────────────────────────────
+# Tailscale Transport
+# ─────────────────────────────────────────────────────────────
+# Prerequisites: Tailscale v1.38+ installed and enrolled (`tailscale up`).
+# See docs/transport/tailscale.md for full details.
+
+# serve mode (recommended): tailscale serve handles HTTPS termination.
+# Requires MagicDNS + HTTPS enabled on the tailnet.
+cargo run --release -- start \
+  --tailscale serve \
+  --agent-command "copilot --acp" \
+  --qr
+
+# ip mode: bridge binds directly to the Tailscale IP with self-signed TLS + cert pinning.
+# Works without MagicDNS; mobile app pins the certificate fingerprint.
+cargo run --release -- start \
+  --tailscale ip \
+  --agent-command "copilot --acp" \
+  --qr

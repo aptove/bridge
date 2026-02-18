@@ -11,6 +11,7 @@ mod pairing;
 mod qr;
 mod rate_limiter;
 mod tls;
+mod tailscale;
 mod agent_pool;
 mod push;
 
@@ -22,6 +23,15 @@ use crate::pairing::PairingManager;
 use crate::tls::TlsConfig;
 use crate::agent_pool::{AgentPool, PoolConfig};
 use crate::push::PushRelayClient;
+use crate::tailscale::{is_tailscale_available, get_tailscale_ipv4, get_tailscale_hostname, tailscale_serve_start, TailscaleServeGuard};
+
+#[derive(Clone, Debug, clap::ValueEnum)]
+enum TailscaleMode {
+    /// Bridge stays on loopback; tailscale serve provides HTTPS (requires MagicDNS + HTTPS)
+    Serve,
+    /// Bridge binds directly to the Tailscale IP with self-signed TLS + cert pinning
+    Ip,
+}
 
 #[derive(Parser)]
 #[command(name = "bridge")]
@@ -126,6 +136,11 @@ enum Commands {
         /// Spawn and manage the cloudflared tunnel daemon (requires prior `bridge setup`)
         #[arg(long)]
         cloudflare: bool,
+
+        /// Use Tailscale as the bridge transport. `serve`: HTTPS via tailscale serve (recommended,
+        /// requires MagicDNS + HTTPS). `ip`: direct Tailscale IP bind with self-signed TLS.
+        #[arg(long, value_name = "MODE")]
+        tailscale: Option<TailscaleMode>,
     },
     
     /// Show connection QR code
@@ -244,7 +259,7 @@ async fn main() -> Result<()> {
             println!("\n🚀 Start the bridge with: bridge start --agent-command \"gemini --experimental-acp\"");
         }
         
-        Commands::Start { agent_command, port, bind, qr, stdio_proxy, no_auth, no_tls, max_connections_per_ip, max_attempts_per_minute, verbose, keep_alive, session_timeout, max_agents, buffer_messages, push_relay_url, cloudflare } => {
+        Commands::Start { agent_command, port, bind, qr, stdio_proxy, no_auth, no_tls, max_connections_per_ip, max_attempts_per_minute, verbose, keep_alive, session_timeout, max_agents, buffer_messages, push_relay_url, cloudflare, tailscale } => {
             info!("🌉 Starting ACP Bridge...");
             
             if no_auth {
@@ -259,14 +274,30 @@ async fn main() -> Result<()> {
             // Determine the config directory for TLS certs
             let config_dir = BridgeConfig::config_dir();
             std::fs::create_dir_all(&config_dir)?;
-            
-            // Load or generate TLS config (unless --no-tls)
-            let tls_config = if no_tls {
+
+            if stdio_proxy && tailscale.is_some() {
+                anyhow::bail!("--tailscale and --stdio-proxy are mutually exclusive. Use one or the other.");
+            }
+
+            // Collect extra SANs for TLS cert (populated in tailscale ip mode)
+            let mut extra_sans: Vec<String> = vec![];
+
+            // For tailscale ip mode, determine extra SANs BEFORE TLS cert generation
+            if let Some(TailscaleMode::Ip) = &tailscale {
+                let ts_ip = get_tailscale_ipv4()?;
+                extra_sans.push(ts_ip);
+                if let Ok(Some(ts_hostname)) = get_tailscale_hostname() {
+                    extra_sans.push(ts_hostname);
+                }
+            }
+
+            // Load or generate TLS config (unless --no-tls, or serve mode where tailscale provides TLS)
+            let tls_config = if no_tls || matches!(tailscale, Some(TailscaleMode::Serve)) {
                 None
             } else {
-                Some(TlsConfig::load_or_generate(&config_dir)?)
+                Some(TlsConfig::load_or_generate(&config_dir, &extra_sans)?)
             };
-            
+
             let config = if stdio_proxy {
                 // Determine a sensible local IP to advertise to mobile clients
                 // Use local-ip-address crate to avoid external network connections
@@ -317,6 +348,64 @@ async fn main() -> Result<()> {
                 // Always save config for stdio-proxy mode to persist auth_token
                 cfg.save()?;
                 
+                cfg
+            } else if let Some(TailscaleMode::Ip) | Some(TailscaleMode::Serve) = &tailscale {
+                // Tailscale transport mode
+                let (hostname, cert_fingerprint) = match &tailscale {
+                    Some(TailscaleMode::Ip) => {
+                        // extra_sans was populated above; first entry is the IP
+                        let ts_ip = extra_sans.first().cloned().unwrap_or_default();
+                        // Prefer MagicDNS hostname for the pairing URL if available
+                        let addr = extra_sans.get(1).cloned().unwrap_or(ts_ip);
+                        let protocol = if tls_config.is_some() { "wss" } else { "ws" };
+                        let h = format!("{}://{}:{}", protocol, addr, port);
+                        println!("📡 Tailscale (ip): {}", h);
+                        let fp = tls_config.as_ref().map(|t| t.fingerprint.clone());
+                        (h, fp)
+                    }
+                    Some(TailscaleMode::Serve) => {
+                        let ts_hostname = get_tailscale_hostname()?
+                            .ok_or_else(|| anyhow::anyhow!(
+                                "tailscale serve mode requires MagicDNS + HTTPS to be enabled on your tailnet.\n\
+                                 Enable HTTPS in the Tailscale admin console: https://tailscale.com/kb/1153/enabling-https"
+                            ))?;
+                        let h = format!("wss://{}", ts_hostname);
+                        // No fingerprint for serve mode — tailscale provides the cert
+                        (h, None)
+                    }
+                    _ => unreachable!(),
+                };
+
+                let mut cfg = if let Ok(mut existing) = BridgeConfig::load() {
+                    existing.hostname = hostname;
+                    existing.cert_fingerprint = cert_fingerprint;
+                    existing
+                } else {
+                    BridgeConfig {
+                        hostname,
+                        tunnel_id: String::new(),
+                        tunnel_secret: String::new(),
+                        account_id: String::new(),
+                        client_id: String::new(),
+                        client_secret: String::new(),
+                        domain: String::new(),
+                        subdomain: String::new(),
+                        auth_token: String::new(),
+                        cert_fingerprint,
+                    }
+                };
+
+                if !no_auth && cfg.auth_token.is_empty() {
+                    cfg.ensure_auth_token();
+                    info!("🔑 Generated new auth token");
+                    if verbose {
+                        println!("🔐 Relay Token (for Bruno/testing): {}", cfg.auth_token);
+                    }
+                } else if verbose && !no_auth {
+                    println!("🔐 Relay Token (for Bruno/testing): {}", cfg.auth_token);
+                }
+
+                cfg.save()?;
                 cfg
             } else {
                 let mut cfg = BridgeConfig::load()?;
@@ -434,6 +523,17 @@ async fn main() -> Result<()> {
                 None
             };
 
+            #[allow(unused_imports)]
+            let _tailscale_serve_guard: Option<TailscaleServeGuard> = if let Some(TailscaleMode::Serve) = &tailscale {
+                info!("🌐 Starting tailscale serve...");
+                let guard = tailscale_serve_start(port)?;
+                let hostname_display = get_tailscale_hostname()?.unwrap_or_default();
+                println!("📡 Tailscale (serve): wss://{}", hostname_display);
+                Some(guard)
+            } else {
+                None
+            };
+
             bridge.start().await?;
         }
         
@@ -467,6 +567,22 @@ async fn main() -> Result<()> {
                         Err(e) => {
                             println!("cloudflared config: ❌ Cannot determine path: {}", e);
                         }
+                    }
+
+                    // Check Tailscale status
+                    if is_tailscale_available() {
+                        match get_tailscale_ipv4() {
+                            Ok(ip) => {
+                                println!("Tailscale IP: {}", ip);
+                                match get_tailscale_hostname() {
+                                    Ok(Some(hostname)) => println!("Tailscale hostname: {}", hostname),
+                                    _ => {}
+                                }
+                            }
+                            Err(_) => println!("Tailscale: not enrolled (run 'tailscale up')"),
+                        }
+                    } else {
+                        println!("Tailscale: not installed");
                     }
                 }
                 Err(e) => {

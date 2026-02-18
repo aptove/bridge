@@ -8,6 +8,7 @@ A bridge between stdio-based Agent Client Protocol (ACP) agents and mobile appli
 |------|----------|---------------|
 | **Local** | Same Wi-Fi network, secure pairing with QR code | [docs/transport/local.md](docs/transport/local.md) |
 | **Cloudflare** | Remote access via Cloudflare Zero Trust (internet-accessible) | [docs/transport/cloudflare.md](docs/transport/cloudflare.md) |
+| **Tailscale** | Private overlay network (serve: MagicDNS+HTTPS; ip: direct Tailscale IP) | [docs/transport/tailscale.md](docs/transport/tailscale.md) |
 
 ## Features
 

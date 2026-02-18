@@ -2,13 +2,15 @@ use anyhow::{Context, Result};
 use rcgen::{Certificate, CertificateParams, DnType, SanType};
 use sha2::{Sha256, Digest};
 use std::fs;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_rustls::rustls;
-use tracing::info;
+use tracing::{info, warn};
 
 const CERT_FILENAME: &str = "cert.pem";
 const KEY_FILENAME: &str = "key.pem";
+const EXTRA_SANS_FILENAME: &str = "cert-extra-sans.json";
 
 /// TLS configuration for the bridge
 pub struct TlsConfig {
@@ -25,18 +27,43 @@ pub struct TlsConfig {
 }
 
 impl TlsConfig {
-    /// Load or generate TLS configuration
-    pub fn load_or_generate(config_dir: &PathBuf) -> Result<Self> {
+    /// Load or generate TLS configuration.
+    /// `extra_sans` is a list of additional IP addresses or DNS names to include in the certificate SANs.
+    pub fn load_or_generate(config_dir: &PathBuf, extra_sans: &[String]) -> Result<Self> {
         let cert_path = config_dir.join(CERT_FILENAME);
         let key_path = config_dir.join(KEY_FILENAME);
+        let extra_sans_path = config_dir.join(EXTRA_SANS_FILENAME);
 
-        // Check if both cert and key exist
+        // If cert exists, check whether extra_sans have changed
+        if cert_path.exists() && key_path.exists() {
+            if !extra_sans.is_empty() {
+                let mut sorted = extra_sans.to_vec();
+                sorted.sort();
+                let current_json = serde_json::to_string(&sorted).unwrap_or_default();
+
+                let stored_json = fs::read_to_string(&extra_sans_path).unwrap_or_default();
+                if stored_json.trim() != current_json.trim() {
+                    warn!("⚠️  Tailscale address changed since last certificate generation. Regenerating TLS certificate (mobile app will need to re-pair).");
+                    let _ = fs::remove_file(&cert_path);
+                    let _ = fs::remove_file(&key_path);
+                }
+            }
+        }
+
         if cert_path.exists() && key_path.exists() {
             info!("🔐 Loading existing TLS certificate");
             Self::load_existing(&cert_path, &key_path)
         } else {
             info!("🔐 Generating new self-signed TLS certificate");
-            Self::generate_new(&cert_path, &key_path)
+            let result = Self::generate_new(&cert_path, &key_path, extra_sans)?;
+            // Persist extra_sans for future change detection
+            if !extra_sans.is_empty() {
+                let mut sorted = extra_sans.to_vec();
+                sorted.sort();
+                let json = serde_json::to_string(&sorted).unwrap_or_default();
+                let _ = fs::write(&extra_sans_path, json);
+            }
+            Ok(result)
         }
     }
 
@@ -59,21 +86,34 @@ impl TlsConfig {
     }
 
     /// Generate new self-signed certificate
-    fn generate_new(cert_path: &PathBuf, key_path: &PathBuf) -> Result<Self> {
+    fn generate_new(cert_path: &PathBuf, key_path: &PathBuf, extra_sans: &[String]) -> Result<Self> {
         // Set up certificate parameters
         let mut params = CertificateParams::default();
         params.distinguished_name.push(DnType::CommonName, "ACP Bridge");
         params.distinguished_name.push(DnType::OrganizationName, "Local Development");
-        
-        // Add SANs for local connections
+
+        // Add base SANs for local connections
         params.subject_alt_names = vec![
             SanType::DnsName("localhost".try_into().unwrap()),
             SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))),
         ];
-        
-        // Add local network IPs as SANs
+
+        // Add local network IP
         if let Ok(local_ip) = local_ip_address::local_ip() {
             params.subject_alt_names.push(SanType::IpAddress(local_ip));
+        }
+
+        // Add extra SANs (Tailscale IP/hostname, etc.)
+        for san in extra_sans {
+            if let Ok(ip) = san.parse::<IpAddr>() {
+                params.subject_alt_names.push(SanType::IpAddress(ip));
+            } else {
+                let dns = san.clone().try_into();
+                match dns {
+                    Ok(d) => params.subject_alt_names.push(SanType::DnsName(d)),
+                    Err(_) => warn!("Skipping invalid SAN '{}': not a valid IP or DNS name", san),
+                }
+            }
         }
         
         // Valid for 1 year
