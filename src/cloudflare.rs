@@ -350,4 +350,140 @@ impl CloudflareClient {
         let random_bytes: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
         general_purpose::STANDARD.encode(random_bytes)
     }
+
+    /// Get the account ID for this client
+    #[allow(dead_code)]
+    pub fn account_id(&self) -> &str {
+        &self.account_id
+    }
+}
+
+/// Write the cloudflared tunnel credentials JSON file to ~/.cloudflared/<tunnel-id>.json.
+/// This file is required by `cloudflared tunnel run` to authenticate to Cloudflare.
+pub fn write_credentials_file(
+    account_id: &str,
+    tunnel_id: &str,
+    tunnel_secret: &str,
+) -> Result<std::path::PathBuf> {
+    let cloudflared_dir = get_cloudflared_dir()?;
+    std::fs::create_dir_all(&cloudflared_dir)
+        .context("Failed to create ~/.cloudflared directory")?;
+
+    let credentials_path = cloudflared_dir.join(format!("{}.json", tunnel_id));
+    let credentials = serde_json::json!({
+        "AccountTag": account_id,
+        "TunnelSecret": tunnel_secret,
+        "TunnelID": tunnel_id,
+    });
+    std::fs::write(&credentials_path, serde_json::to_string_pretty(&credentials)?)
+        .context("Failed to write tunnel credentials file")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(&credentials_path, perms)?;
+    }
+
+    Ok(credentials_path)
+}
+
+/// Write the cloudflared config.yml to ~/.cloudflared/config.yml.
+/// This configures which tunnel to run and the ingress rules.
+pub fn write_cloudflared_config(
+    tunnel_id: &str,
+    credentials_path: &std::path::Path,
+    hostname: &str,
+    local_port: u16,
+) -> Result<std::path::PathBuf> {
+    let cloudflared_dir = get_cloudflared_dir()?;
+    std::fs::create_dir_all(&cloudflared_dir)
+        .context("Failed to create ~/.cloudflared directory")?;
+
+    let config_path = cloudflared_dir.join("config.yml");
+    let credentials_str = credentials_path.to_string_lossy();
+    let config_content = format!(
+        "tunnel: {tunnel_id}\n\
+         credentials-file: {credentials_str}\n\
+         \n\
+         ingress:\n\
+           - hostname: {hostname}\n\
+             service: http://localhost:{local_port}\n\
+           - service: http_status:404\n"
+    );
+    std::fs::write(&config_path, &config_content)
+        .context("Failed to write cloudflared config.yml")?;
+
+    Ok(config_path)
+}
+
+/// Return the path to the cloudflared config YAML (does not check existence).
+pub fn cloudflared_config_path() -> Result<std::path::PathBuf> {
+    Ok(get_cloudflared_dir()?.join("config.yml"))
+}
+
+/// Return the path to the cloudflared credentials file for a given tunnel ID.
+#[allow(dead_code)]
+pub fn cloudflared_credentials_path(tunnel_id: &str) -> Result<std::path::PathBuf> {
+    Ok(get_cloudflared_dir()?.join(format!("{}.json", tunnel_id)))
+}
+
+fn get_cloudflared_dir() -> Result<std::path::PathBuf> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .context("Cannot determine home directory (HOME not set)")?;
+    Ok(std::path::PathBuf::from(home).join(".cloudflared"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn fake_cloudflared_dir(tmp: &TempDir) -> std::path::PathBuf {
+        let dir = tmp.path().join(".cloudflared");
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn credentials_file_has_required_fields() {
+        let tmp = TempDir::new().unwrap();
+        // Override HOME so write_credentials_file uses tmp dir
+        std::env::set_var("HOME", tmp.path().to_str().unwrap());
+
+        let path = write_credentials_file("acct123", "tunnel-abc", "secret-base64==").unwrap();
+        assert!(path.exists(), "credentials file should be created");
+
+        let content = fs::read_to_string(&path).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(json["AccountTag"], "acct123");
+        assert_eq!(json["TunnelSecret"], "secret-base64==");
+        assert_eq!(json["TunnelID"], "tunnel-abc");
+    }
+
+    #[test]
+    fn config_yml_has_correct_sections() {
+        let tmp = TempDir::new().unwrap();
+        std::env::set_var("HOME", tmp.path().to_str().unwrap());
+
+        let creds_path = fake_cloudflared_dir(&tmp).join("tunnel-abc.json");
+        fs::write(&creds_path, "{}").unwrap();
+
+        let config_path = write_cloudflared_config(
+            "tunnel-abc",
+            &creds_path,
+            "agent.example.com",
+            8080,
+        )
+        .unwrap();
+
+        let content = fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("tunnel: tunnel-abc"), "should have tunnel ID");
+        assert!(content.contains("credentials-file:"), "should have credentials-file");
+        assert!(content.contains("hostname: agent.example.com"), "should have hostname");
+        assert!(content.contains("http://localhost:8080"), "should have local port");
+        assert!(content.contains("http_status:404"), "should have fallback rule");
+    }
 }

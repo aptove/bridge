@@ -18,6 +18,9 @@ pub struct BridgeConfig {
     pub hostname: String,
     pub tunnel_id: String,
     pub tunnel_secret: String,
+    /// Cloudflare account ID (needed to write cloudflared credentials file)
+    #[serde(default)]
+    pub account_id: String,
     pub client_id: String,
     pub client_secret: String,
     pub domain: String,

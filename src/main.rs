@@ -1,9 +1,10 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use tracing::{info, error, warn};
 
 mod cloudflare;
+mod cloudflared_runner;
 mod bridge;
 mod config;
 mod pairing;
@@ -13,7 +14,8 @@ mod tls;
 mod agent_pool;
 mod push;
 
-use crate::cloudflare::CloudflareClient;
+use crate::cloudflare::{CloudflareClient, write_credentials_file, write_cloudflared_config, cloudflared_config_path};
+use crate::cloudflared_runner::CloudflaredRunner;
 use crate::bridge::StdioBridge;
 use crate::config::BridgeConfig;
 use crate::pairing::PairingManager;
@@ -120,6 +122,10 @@ enum Commands {
         /// when the client is disconnected
         #[arg(long, default_value = "https://push.oss.aptov.com")]
         push_relay_url: Option<String>,
+
+        /// Spawn and manage the cloudflared tunnel daemon (requires prior `bridge setup`)
+        #[arg(long)]
+        cloudflare: bool,
     },
     
     /// Show connection QR code
@@ -169,7 +175,7 @@ async fn main() -> Result<()> {
         } => {
             info!("🚀 Starting Cloudflare Zero Trust setup...");
             
-            let client = CloudflareClient::new(api_token, account_id);
+            let client = CloudflareClient::new(api_token.clone(), account_id.clone());
             
             // Step 1: Create or get existing tunnel
             info!("📡 Creating Cloudflare Tunnel: {}", tunnel_name);
@@ -197,11 +203,24 @@ async fn main() -> Result<()> {
             client.configure_tunnel_ingress(&tunnel.id, &hostname, 8080).await?;
             info!("✅ Tunnel ingress configured");
             
-            // Step 6: Save configuration
+            // Step 6: Write cloudflared credentials file (~/.cloudflared/<tunnel-id>.json)
+            info!("📄 Writing cloudflared credentials file...");
+            let credentials_path = write_credentials_file(&account_id, &tunnel.id, &tunnel.secret)
+                .context("Failed to write cloudflared credentials file")?;
+            info!("✅ Credentials file written to: {}", credentials_path.display());
+            
+            // Step 7: Write cloudflared config.yml (~/.cloudflared/config.yml)
+            info!("📄 Writing cloudflared config.yml...");
+            let config_yml_path = write_cloudflared_config(&tunnel.id, &credentials_path, &hostname, 8080)
+                .context("Failed to write cloudflared config.yml")?;
+            info!("✅ Config file written to: {}", config_yml_path.display());
+            
+            // Step 8: Save bridge configuration
             let mut config = BridgeConfig {
                 hostname: format!("https://{}", hostname),
                 tunnel_id: tunnel.id.clone(),
                 tunnel_secret: tunnel.secret.clone(),
+                account_id,
                 client_id: service_token.client_id,
                 client_secret: service_token.client_secret,
                 domain,
@@ -225,7 +244,7 @@ async fn main() -> Result<()> {
             println!("\n🚀 Start the bridge with: bridge start --agent-command \"gemini --experimental-acp\"");
         }
         
-        Commands::Start { agent_command, port, bind, qr, stdio_proxy, no_auth, no_tls, max_connections_per_ip, max_attempts_per_minute, verbose, keep_alive, session_timeout, max_agents, buffer_messages, push_relay_url } => {
+        Commands::Start { agent_command, port, bind, qr, stdio_proxy, no_auth, no_tls, max_connections_per_ip, max_attempts_per_minute, verbose, keep_alive, session_timeout, max_agents, buffer_messages, push_relay_url, cloudflare } => {
             info!("🌉 Starting ACP Bridge...");
             
             if no_auth {
@@ -274,6 +293,7 @@ async fn main() -> Result<()> {
                         hostname,
                         tunnel_id: String::new(),
                         tunnel_secret: String::new(),
+                        account_id: String::new(),
                         client_id: String::new(),
                         client_secret: String::new(),
                         domain: String::new(),
@@ -396,7 +416,24 @@ async fn main() -> Result<()> {
             if let Some(push_relay) = push_client {
                 bridge = bridge.with_push_relay((*push_relay).clone());
             }
-            
+
+            // Spawn and manage cloudflared tunnel daemon if requested
+            let _cloudflared_runner = if cloudflare {
+                if config.tunnel_id.is_empty() {
+                    anyhow::bail!(
+                        "Tunnel not configured. Run 'bridge setup' first."
+                    );
+                }
+                let config_yml = cloudflared_config_path()?;
+                info!("🌐 Starting cloudflared tunnel daemon...");
+                let mut runner = CloudflaredRunner::spawn(&config_yml, &config.tunnel_id)?;
+                runner.wait_for_ready(std::time::Duration::from_secs(30))?;
+                println!("🌐 Cloudflare tunnel active: {}", config.hostname);
+                Some(runner)
+            } else {
+                None
+            };
+
             bridge.start().await?;
         }
         
@@ -410,9 +447,27 @@ async fn main() -> Result<()> {
                 Ok(config) => {
                     println!("✅ Configuration found\n");
                     println!("Hostname: {}", config.hostname);
-                    println!("Tunnel ID: {}", config.tunnel_id);
+                    println!("Tunnel ID: {}", if config.tunnel_id.is_empty() {
+                        "⚠️  Not configured (run 'bridge setup')".to_string()
+                    } else {
+                        config.tunnel_id.clone()
+                    });
                     println!("Domain: {}.{}", config.subdomain, config.domain);
                     println!("Config file: {}", BridgeConfig::config_path().display());
+
+                    // Check cloudflared config file presence
+                    match cloudflared_config_path() {
+                        Ok(path) => {
+                            if path.exists() {
+                                println!("cloudflared config: ✅ {}", path.display());
+                            } else {
+                                println!("cloudflared config: ⚠️  Not found at {} (run 'bridge setup')", path.display());
+                            }
+                        }
+                        Err(e) => {
+                            println!("cloudflared config: ❌ Cannot determine path: {}", e);
+                        }
+                    }
                 }
                 Err(e) => {
                     error!("❌ No configuration found: {}", e);

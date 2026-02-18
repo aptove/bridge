@@ -7,7 +7,7 @@ A bridge between stdio-based Agent Client Protocol (ACP) agents and mobile appli
 | Mode | Use Case | Documentation |
 |------|----------|---------------|
 | **Local** | Same Wi-Fi network, secure pairing with QR code | [docs/transport/local.md](docs/transport/local.md) |
-| **Cloudflare** | Remote access via Cloudflare Zero Trust | *Experimental* |
+| **Cloudflare** | Remote access via Cloudflare Zero Trust (internet-accessible) | [docs/transport/cloudflare.md](docs/transport/cloudflare.md) |
 
 ## Features
 

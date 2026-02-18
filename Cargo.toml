@@ -65,3 +65,4 @@ urlencoding = "2.1"
 
 [dev-dependencies]
 mockito = "1.2"
+tempfile = "3.10"
