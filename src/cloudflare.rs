@@ -273,7 +273,7 @@ impl CloudflareClient {
             "auto_redirect_to_identity": false,
         });
 
-        let response: CloudflareResponse<AccessApplication> = self
+        let response: CloudflareResponse<Option<AccessApplication>> = self
             .client
             .post(&url)
             .json(&payload)
@@ -284,14 +284,42 @@ impl CloudflareClient {
             .await
             .context("Failed to parse Access Application response")?;
 
-        if !response.success {
-            anyhow::bail!("Failed to create Access Application: {:?}", response.errors);
+        if !response.success || response.result.is_none() {
+            warn!("Access Application creation failed, checking for existing app...");
+            let app = self.find_access_application(hostname).await?;
+            // Policy may already exist; ignore errors from duplicate policy creation
+            let _ = self.create_service_auth_policy(&app.id, hostname).await;
+            return Ok(app);
         }
 
+        let app = response.result.unwrap();
         // Create Service Auth policy
-        self.create_service_auth_policy(&response.result.id, hostname).await?;
+        self.create_service_auth_policy(&app.id, hostname).await?;
+        Ok(app)
+    }
 
-        Ok(response.result)
+    /// Find an existing Access Application by hostname.
+    async fn find_access_application(&self, hostname: &str) -> Result<AccessApplication> {
+        let url = format!(
+            "{}/accounts/{}/access/apps",
+            CLOUDFLARE_API_BASE, self.account_id
+        );
+
+        let response: CloudflareResponse<Vec<AccessApplication>> = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .context("Failed to list Access Applications")?
+            .json()
+            .await
+            .context("Failed to parse Access Applications list")?;
+
+        response
+            .result
+            .into_iter()
+            .find(|app| app.domain == hostname)
+            .with_context(|| format!("No Access Application found for hostname: {}", hostname))
     }
 
     /// Create Service Auth policy for the application
@@ -322,6 +350,14 @@ impl CloudflareClient {
             .context("Failed to parse policy response")?;
 
         if !response.success {
+            // Ignore "already exists" type errors — policy from a previous run is fine
+            let already_exists = response.errors.iter().any(|e| {
+                e.message.contains("already exists") || e.message.contains("duplicate")
+            });
+            if already_exists {
+                warn!("Service Auth policy already exists, skipping...");
+                return Ok(());
+            }
             anyhow::bail!("Failed to create Service Auth policy: {:?}", response.errors);
         }
 
