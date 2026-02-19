@@ -31,6 +31,14 @@ pub struct BridgeConfig {
     /// TLS certificate fingerprint (SHA256, hex encoded with colons)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cert_fingerprint: Option<String>,
+    /// Unix timestamp (seconds) when the Cloudflare service token was last issued.
+    /// Used to detect upcoming expiry (token duration: 1 year = 8760h).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_token_issued_at: Option<i64>,
+    /// Cloudflare API token — stored so auto-rotation works without re-prompting.
+    /// Stored with 0600 permissions alongside other secrets.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_token: String,
 }
 
 impl BridgeConfig {
@@ -88,6 +96,35 @@ impl BridgeConfig {
         if self.auth_token.is_empty() {
             self.auth_token = Self::generate_auth_token();
         }
+    }
+
+    /// Service token lifetime: 1 year in seconds
+    const SERVICE_TOKEN_LIFETIME_SECS: i64 = 365 * 24 * 3600;
+    /// Rotate when fewer than 30 days remain
+    const SERVICE_TOKEN_ROTATE_THRESHOLD_SECS: i64 = 30 * 24 * 3600;
+
+    /// Returns true if the service token is expired or will expire within 30 days.
+    pub fn service_token_needs_rotation(&self) -> bool {
+        let issued_at = match self.service_token_issued_at {
+            Some(ts) => ts,
+            // No timestamp recorded → assume old/unknown, rotate to be safe
+            None => return !self.client_id.is_empty(),
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let age = now - issued_at;
+        age >= Self::SERVICE_TOKEN_LIFETIME_SECS - Self::SERVICE_TOKEN_ROTATE_THRESHOLD_SECS
+    }
+
+    /// Record now as the service token issuance time.
+    pub fn stamp_service_token_issued(&mut self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.service_token_issued_at = Some(now);
     }
 
     /// Load configuration from disk

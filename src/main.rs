@@ -150,14 +150,38 @@ enum Commands {
     Status,
 }
 
-/// Ensure Cloudflare config exists — load it if valid, or run interactive first-time setup.
+/// Ensure Cloudflare config exists — load it if valid, auto-rotate token if near expiry,
+/// or run interactive first-time setup.
 async fn ensure_cloudflare_config(no_auth: bool) -> Result<BridgeConfig> {
     use std::io::{self, BufRead, Write};
 
-    // If a valid config already exists (has tunnel and service token), use it
+    // If a valid config already exists (has tunnel and service token), check token health
     if let Ok(mut cfg) = BridgeConfig::load() {
         if !cfg.tunnel_id.is_empty() && !cfg.client_id.is_empty() && !cfg.client_secret.is_empty() {
-            info!("✅ Using existing Cloudflare configuration for {}", cfg.hostname);
+            if cfg.service_token_needs_rotation() {
+                if cfg.api_token.is_empty() {
+                    warn!("⚠️  Cloudflare service token is expiring soon but no API token is saved.");
+                    warn!("   Delete the config file and re-run to trigger full re-setup:");
+                    warn!("   rm {}", BridgeConfig::config_path().display());
+                } else {
+                    info!("🔄 Cloudflare service token is expiring — auto-rotating...");
+                    let client = CloudflareClient::new(cfg.api_token.clone(), cfg.account_id.clone());
+                    match client.create_service_token(&cfg.hostname.trim_start_matches("https://")).await {
+                        Ok(new_token) => {
+                            cfg.client_id = new_token.client_id;
+                            cfg.client_secret = new_token.client_secret;
+                            cfg.stamp_service_token_issued();
+                            cfg.save()?;
+                            info!("✅ Service token rotated — re-scan QR code on your mobile app");
+                        }
+                        Err(e) => {
+                            warn!("⚠️  Service token rotation failed: {}. Using existing token.", e);
+                        }
+                    }
+                }
+            } else {
+                info!("✅ Using existing Cloudflare configuration for {}", cfg.hostname);
+            }
             if !no_auth && cfg.auth_token.is_empty() {
                 cfg.ensure_auth_token();
                 cfg.save()?;
@@ -228,7 +252,10 @@ async fn ensure_cloudflare_config(no_auth: bool) -> Result<BridgeConfig> {
         subdomain,
         auth_token: String::new(),
         cert_fingerprint: None,
+        service_token_issued_at: None,
+        api_token,
     };
+    cfg.stamp_service_token_issued();
     if !no_auth {
         cfg.ensure_auth_token();
     }
@@ -330,10 +357,13 @@ async fn main() -> Result<()> {
                 subdomain,
                 auth_token: String::new(),
                 cert_fingerprint: None,
+                service_token_issued_at: None,
+                api_token,
             };
             
             // Generate auth token for secure connections
             config.ensure_auth_token();
+            config.stamp_service_token_issued();
             
             config.save()?;
             info!("✅ Configuration saved to: {}", BridgeConfig::config_path().display());
@@ -419,6 +449,8 @@ async fn main() -> Result<()> {
                         subdomain: String::new(),
                         auth_token: String::new(),
                         cert_fingerprint: tls_config.as_ref().map(|t| t.fingerprint.clone()),
+                        service_token_issued_at: None,
+                        api_token: String::new(),
                     }
                 };
                 
@@ -480,6 +512,8 @@ async fn main() -> Result<()> {
                         subdomain: String::new(),
                         auth_token: String::new(),
                         cert_fingerprint,
+                        service_token_issued_at: None,
+                        api_token: String::new(),
                     }
                 };
 
