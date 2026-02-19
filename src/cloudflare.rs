@@ -191,7 +191,8 @@ impl CloudflareClient {
             // Error 81053/81057: record with that name already exists — update it instead
             if response.errors.iter().any(|e| e.code == 81053 || e.code == 81057) {
                 warn!("DNS record already exists, updating to point to current tunnel...");
-                return self.update_dns_record(&zone_id, subdomain, &tunnel_cname).await;
+                let full_hostname = format!("{}.{}", subdomain, zone_name);
+                return self.update_dns_record(&zone_id, &full_hostname, &tunnel_cname).await;
             }
             anyhow::bail!("Failed to create DNS record: {:?}", response.errors);
         }
