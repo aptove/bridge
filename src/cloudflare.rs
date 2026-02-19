@@ -247,7 +247,7 @@ impl CloudflareClient {
             "name": format!("Service Auth - {}", hostname),
             "decision": "non_identity",
             "include": [{
-                "service_token": {}
+                "any_valid_service_token": {}
             }],
             "precedence": 1,
         });
