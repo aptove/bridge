@@ -108,13 +108,17 @@ impl PairingManager {
 
     /// Get the pairing URL (for QR code)
     pub fn get_pairing_url(&self, base_url: &str) -> String {
-        let mut url = format!("{}/pair/local?code={}", base_url, self.code);
-        if let Some(ref fp) = self.cert_fingerprint {
-            // URL-encode the fingerprint (colons are safe, but good practice)
-            url.push_str("&fp=");
-            url.push_str(&urlencoding::encode(fp));
+        if self.client_id.is_some() {
+            // Cloudflare mode: use /pair/cloudflare path, no fingerprint needed
+            format!("{}/pair/cloudflare?code={}", base_url, self.code)
+        } else {
+            let mut url = format!("{}/pair/local?code={}", base_url, self.code);
+            if let Some(ref fp) = self.cert_fingerprint {
+                url.push_str("&fp=");
+                url.push_str(&urlencoding::encode(fp));
+            }
+            url
         }
-        url
     }
 
     /// Check if the code has expired

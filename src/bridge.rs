@@ -210,7 +210,7 @@ where
     let first_line = request_str.lines().next().unwrap_or("");
     
     // Check if this is a pairing request
-    if first_line.contains("/pair/local") && first_line.starts_with("GET") {
+    if (first_line.contains("/pair/local") || first_line.contains("/pair/cloudflare")) && first_line.starts_with("GET") {
         info!("🔗 Pairing request received");
         return handle_pairing_request(&mut stream, &request_str, pairing_manager).await;
     }
