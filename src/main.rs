@@ -561,15 +561,19 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // In cloudflare mode, always show the QR code (it contains CF secrets + auth token)
-            let pairing_manager = if qr || cloudflare {
-                let (client_id, client_secret) = if cloudflare {
-                    let id = if config.client_id.is_empty() { None } else { Some(config.client_id.clone()) };
-                    let secret = if config.client_secret.is_empty() { None } else { Some(config.client_secret.clone()) };
-                    (id, secret)
-                } else {
-                    (None, None)
-                };
+            // For Cloudflare mode: embed credentials directly in the QR (JSON format).
+            // The pairing-URL handshake can't be used because the pairing endpoint is
+            // protected by Cloudflare Access — the app doesn't yet have the tokens needed
+            // to reach it. The JSON QR is scanned offline with no network round-trip.
+            // For local/TLS mode: use the pairing-URL flow so the fingerprint can be
+            // validated before credentials are handed over.
+            if cloudflare {
+                qr::display_qr_code(&config)?;
+            }
+
+            // Pairing manager for local/TLS mode (QR with one-time code + cert pinning)
+            let pairing_manager = if qr && !cloudflare {
+                let (client_id, client_secret) = (None, None);
                 Some(PairingManager::new_with_cf(
                     config.hostname.clone(),
                     config.auth_token.clone(),
@@ -581,7 +585,7 @@ async fn main() -> Result<()> {
                 None
             };
 
-            // Display QR code with pairing URL if enabled
+            // Display QR code with pairing URL if enabled (local/TLS mode)
             if let Some(ref pm) = pairing_manager {
                 qr::display_qr_code_with_pairing(&config, pm)?;
             }
