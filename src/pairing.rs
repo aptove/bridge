@@ -76,15 +76,6 @@ pub struct PairingManager {
 }
 
 impl PairingManager {
-    /// Create a new PairingManager with a fresh pairing code
-    pub fn new(
-        websocket_url: String,
-        auth_token: String,
-        cert_fingerprint: Option<String>,
-    ) -> Self {
-        Self::new_with_cf(websocket_url, auth_token, cert_fingerprint, None, None)
-    }
-
     /// Create a new PairingManager including Cloudflare service token credentials
     pub fn new_with_cf(
         websocket_url: String,
