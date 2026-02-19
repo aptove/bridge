@@ -518,10 +518,19 @@ async fn main() -> Result<()> {
 
             // In cloudflare mode, always show the QR code (it contains CF secrets + auth token)
             let pairing_manager = if qr || cloudflare {
-                Some(PairingManager::new(
+                let (client_id, client_secret) = if cloudflare {
+                    let id = if config.client_id.is_empty() { None } else { Some(config.client_id.clone()) };
+                    let secret = if config.client_secret.is_empty() { None } else { Some(config.client_secret.clone()) };
+                    (id, secret)
+                } else {
+                    (None, None)
+                };
+                Some(PairingManager::new_with_cf(
                     config.hostname.clone(),
                     config.auth_token.clone(),
                     config.cert_fingerprint.clone(),
+                    client_id,
+                    client_secret,
                 ))
             } else {
                 None

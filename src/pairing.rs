@@ -24,6 +24,10 @@ pub struct PairingResponse {
     pub auth_token: String,
     #[serde(rename = "certFingerprint", skip_serializing_if = "Option::is_none")]
     pub cert_fingerprint: Option<String>,
+    #[serde(rename = "clientId", skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(rename = "clientSecret", skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
 }
 
 /// Error response for failed pairing attempts
@@ -63,6 +67,8 @@ pub struct PairingManager {
     websocket_url: String,
     auth_token: String,
     cert_fingerprint: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
     /// Code expiration duration
     expiry_duration: Duration,
     /// Maximum failed attempts before rate limiting
@@ -76,6 +82,17 @@ impl PairingManager {
         auth_token: String,
         cert_fingerprint: Option<String>,
     ) -> Self {
+        Self::new_with_cf(websocket_url, auth_token, cert_fingerprint, None, None)
+    }
+
+    /// Create a new PairingManager including Cloudflare service token credentials
+    pub fn new_with_cf(
+        websocket_url: String,
+        auth_token: String,
+        cert_fingerprint: Option<String>,
+        client_id: Option<String>,
+        client_secret: Option<String>,
+    ) -> Self {
         let code = generate_pairing_code();
         Self {
             code,
@@ -85,6 +102,8 @@ impl PairingManager {
             websocket_url,
             auth_token,
             cert_fingerprint,
+            client_id,
+            client_secret,
             expiry_duration: Duration::from_secs(60),
             max_attempts: 5,
         }
@@ -164,6 +183,8 @@ impl PairingManager {
             version: "1.0".to_string(),
             auth_token: self.auth_token.clone(),
             cert_fingerprint: self.cert_fingerprint.clone(),
+            client_id: self.client_id.clone(),
+            client_secret: self.client_secret.clone(),
         })
     }
 
