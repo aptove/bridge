@@ -35,18 +35,26 @@ pub struct ServiceToken {
 }
 
 #[derive(Debug, Deserialize)]
-struct CloudflareResponse<T> {
-    result: T,
+struct CloudflareResponse {
+    #[serde(default)]
+    result: serde_json::Value,
     success: bool,
+    #[serde(default)]
     errors: Vec<CloudflareError>,
     #[allow(dead_code)]
+    #[serde(default)]
     messages: Vec<String>,
+}
+
+impl CloudflareResponse {
+    fn into_result<T: serde::de::DeserializeOwned>(self) -> anyhow::Result<T> {
+        serde_json::from_value(self.result).context("Failed to deserialize API result")
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct CloudflareError {
     code: i32,
-    #[allow(dead_code)]
     message: String,
 }
 
@@ -84,7 +92,7 @@ impl CloudflareClient {
             CLOUDFLARE_API_BASE, self.account_id
         );
 
-        let response: CloudflareResponse<Vec<Tunnel>> = self
+        let response: CloudflareResponse = self
             .client
             .get(&list_url)
             .send()
@@ -94,9 +102,12 @@ impl CloudflareClient {
             .await
             .context("Failed to parse tunnel list response")?;
 
-        if let Some(existing) = response.result.iter().find(|t| t.name == name) {
-            debug!("Found existing tunnel: {}", existing.id);
-            return Ok(existing.clone());
+        if response.success {
+            let tunnels: Vec<Tunnel> = response.into_result().unwrap_or_default();
+            if let Some(existing) = tunnels.into_iter().find(|t| t.name == name) {
+                debug!("Found existing tunnel: {}", existing.id);
+                return Ok(existing);
+            }
         }
 
         // Create new tunnel
@@ -112,7 +123,7 @@ impl CloudflareClient {
             "tunnel_secret": tunnel_secret,
         });
 
-        let response: CloudflareResponse<Tunnel> = self
+        let response: CloudflareResponse = self
             .client
             .post(&create_url)
             .json(&payload)
@@ -127,7 +138,7 @@ impl CloudflareClient {
             anyhow::bail!("Failed to create tunnel: {:?}", response.errors);
         }
 
-        let mut tunnel = response.result;
+        let mut tunnel: Tunnel = response.into_result().context("No tunnel returned after creation")?;
         tunnel.secret = tunnel_secret;
         Ok(tunnel)
     }
@@ -142,12 +153,7 @@ impl CloudflareClient {
         // Get zone ID from zone name
         let zones_url = format!("{}/zones?name={}", CLOUDFLARE_API_BASE, zone_name);
         
-        #[derive(Deserialize)]
-        struct Zone {
-            id: String,
-        }
-        
-        let zones_response: CloudflareResponse<Vec<Zone>> = self
+        let zones_response: CloudflareResponse = self
             .client
             .get(&zones_url)
             .send()
@@ -157,12 +163,13 @@ impl CloudflareClient {
             .await
             .context("Failed to parse zones response")?;
 
-        let zone_id = zones_response
-            .result
-            .first()
-            .context("Zone not found")?
-            .id
-            .clone();
+        #[derive(Deserialize)]
+        struct Zone {
+            id: String,
+        }
+
+        let zones: Vec<Zone> = zones_response.into_result().context("Zone not found")?;
+        let zone_id = zones.into_iter().next().context("Zone not found")?.id;
 
         // Create DNS record
         let dns_url = format!("{}/zones/{}/dns_records", CLOUDFLARE_API_BASE, zone_id);
@@ -176,7 +183,7 @@ impl CloudflareClient {
             "proxied": true,
         });
 
-        let response: CloudflareResponse<serde_json::Value> = self
+        let response: CloudflareResponse = self
             .client
             .post(&dns_url)
             .json(&payload)
@@ -212,7 +219,7 @@ impl CloudflareClient {
             CLOUDFLARE_API_BASE, zone_id, subdomain
         );
 
-        let list_response: CloudflareResponse<Vec<DnsRecord>> = self
+        let list_response: CloudflareResponse = self
             .client
             .get(&list_url)
             .send()
@@ -222,12 +229,10 @@ impl CloudflareClient {
             .await
             .context("Failed to parse DNS records list")?;
 
-        let record_id = list_response
-            .result
-            .first()
+        let records: Vec<DnsRecord> = list_response.into_result().context("Failed to parse DNS record list")?;
+        let record_id = records.into_iter().next()
             .context("DNS record not found for update")?
-            .id
-            .clone();
+            .id;
 
         let update_url = format!("{}/zones/{}/dns_records/{}", CLOUDFLARE_API_BASE, zone_id, record_id);
         let payload = serde_json::json!({
@@ -238,7 +243,7 @@ impl CloudflareClient {
             "proxied": true,
         });
 
-        let response: CloudflareResponse<serde_json::Value> = self
+        let response: CloudflareResponse = self
             .client
             .put(&update_url)
             .json(&payload)
@@ -273,7 +278,7 @@ impl CloudflareClient {
             "auto_redirect_to_identity": false,
         });
 
-        let response: CloudflareResponse<Option<AccessApplication>> = self
+        let response: CloudflareResponse = self
             .client
             .post(&url)
             .json(&payload)
@@ -284,7 +289,7 @@ impl CloudflareClient {
             .await
             .context("Failed to parse Access Application response")?;
 
-        if !response.success || response.result.is_none() {
+        if !response.success || response.result.is_null() {
             warn!("Access Application creation failed, checking for existing app...");
             let app = self.find_access_application(hostname).await?;
             // Policy may already exist; ignore errors from duplicate policy creation
@@ -292,7 +297,7 @@ impl CloudflareClient {
             return Ok(app);
         }
 
-        let app = response.result.unwrap();
+        let app: AccessApplication = response.into_result().context("Failed to parse Access Application")?;
         // Create Service Auth policy
         self.create_service_auth_policy(&app.id, hostname).await?;
         Ok(app)
@@ -305,7 +310,7 @@ impl CloudflareClient {
             CLOUDFLARE_API_BASE, self.account_id
         );
 
-        let response: CloudflareResponse<Vec<AccessApplication>> = self
+        let response: CloudflareResponse = self
             .client
             .get(&url)
             .send()
@@ -315,9 +320,8 @@ impl CloudflareClient {
             .await
             .context("Failed to parse Access Applications list")?;
 
-        response
-            .result
-            .into_iter()
+        let apps: Vec<AccessApplication> = response.into_result().unwrap_or_default();
+        apps.into_iter()
             .find(|app| app.domain == hostname)
             .with_context(|| format!("No Access Application found for hostname: {}", hostname))
     }
@@ -338,7 +342,7 @@ impl CloudflareClient {
             "precedence": 1,
         });
 
-        let response: CloudflareResponse<serde_json::Value> = self
+        let response: CloudflareResponse = self
             .client
             .post(&url)
             .json(&payload)
@@ -370,13 +374,14 @@ impl CloudflareClient {
             "{}/accounts/{}/access/service_tokens",
             CLOUDFLARE_API_BASE, self.account_id
         );
+        let token_name = format!("Mobile Client - {}", name);
 
         let payload = serde_json::json!({
-            "name": format!("Mobile Client - {}", name),
+            "name": token_name,
             "duration": "8760h", // 1 year
         });
 
-        let response: CloudflareResponse<ServiceToken> = self
+        let response: CloudflareResponse = self
             .client
             .post(&url)
             .json(&payload)
@@ -387,11 +392,70 @@ impl CloudflareClient {
             .await
             .context("Failed to parse Service Token response")?;
 
-        if !response.success {
-            anyhow::bail!("Failed to create Service Token: {:?}", response.errors);
+        if !response.success || response.result.is_null() {
+            warn!("Service Token creation failed, deleting existing token and retrying...");
+            self.delete_service_token_by_name(&token_name).await?;
+
+            let retry: CloudflareResponse = self
+                .client
+                .post(&url)
+                .json(&payload)
+                .send()
+                .await
+                .context("Failed to create Service Token (retry)")?
+                .json()
+                .await
+                .context("Failed to parse Service Token response (retry)")?;
+
+            if !retry.success {
+                anyhow::bail!("Failed to create Service Token: {:?}", retry.errors);
+            }
+            return retry.into_result().context("No Service Token returned after retry");
         }
 
-        Ok(response.result)
+        response.into_result().context("No Service Token returned")
+    }
+
+    /// List service tokens and delete the one matching `name`.
+    async fn delete_service_token_by_name(&self, name: &str) -> Result<()> {
+        #[derive(Deserialize)]
+        struct TokenInfo {
+            id: String,
+            name: String,
+        }
+
+        let list_url = format!(
+            "{}/accounts/{}/access/service_tokens",
+            CLOUDFLARE_API_BASE, self.account_id
+        );
+
+        let list: CloudflareResponse = self
+            .client
+            .get(&list_url)
+            .send()
+            .await
+            .context("Failed to list Service Tokens")?
+            .json()
+            .await
+            .context("Failed to parse Service Token list")?;
+
+        let tokens: Vec<TokenInfo> = list.into_result().unwrap_or_default();
+        for token in tokens {
+            if token.name == name {
+                let delete_url = format!(
+                    "{}/accounts/{}/access/service_tokens/{}",
+                    CLOUDFLARE_API_BASE, self.account_id, token.id
+                );
+                self.client
+                    .delete(&delete_url)
+                    .send()
+                    .await
+                    .context("Failed to delete existing Service Token")?;
+                info!("🗑️  Deleted existing Service Token '{}'", name);
+                return Ok(());
+            }
+        }
+        Ok(()) // not found — that's fine, proceed to create
     }
 
     /// Configure tunnel ingress rules
@@ -420,7 +484,7 @@ impl CloudflareClient {
             }
         });
 
-        let response: CloudflareResponse<serde_json::Value> = self
+        let response: CloudflareResponse = self
             .client
             .put(&url)
             .json(&payload)
