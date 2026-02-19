@@ -567,9 +567,6 @@ async fn main() -> Result<()> {
             // to reach it. The JSON QR is scanned offline with no network round-trip.
             // For local/TLS mode: use the pairing-URL flow so the fingerprint can be
             // validated before credentials are handed over.
-            if cloudflare {
-                qr::display_qr_code(&config)?;
-            }
 
             // Pairing manager for local/TLS mode (QR with one-time code + cert pinning)
             let pairing_manager = if qr && !cloudflare {
@@ -667,6 +664,9 @@ async fn main() -> Result<()> {
                 let mut runner = CloudflaredRunner::spawn(&config_yml, &config.tunnel_id)?;
                 runner.wait_for_ready(std::time::Duration::from_secs(30))?;
                 println!("🌐 Cloudflare tunnel active: {}", config.hostname);
+                // Show QR AFTER tunnel is ready — by the time the user scans, the bridge
+                // will already be listening (bridge.start() binds the socket immediately below)
+                qr::display_qr_code(&config)?;
                 Some(runner)
             } else {
                 None
