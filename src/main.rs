@@ -150,6 +150,94 @@ enum Commands {
     Status,
 }
 
+/// Ensure Cloudflare config exists — load it if valid, or run interactive first-time setup.
+async fn ensure_cloudflare_config(no_auth: bool) -> Result<BridgeConfig> {
+    use std::io::{self, BufRead, Write};
+
+    // If a valid config already exists (has tunnel and service token), use it
+    if let Ok(mut cfg) = BridgeConfig::load() {
+        if !cfg.tunnel_id.is_empty() && !cfg.client_id.is_empty() && !cfg.client_secret.is_empty() {
+            info!("✅ Using existing Cloudflare configuration for {}", cfg.hostname);
+            if !no_auth && cfg.auth_token.is_empty() {
+                cfg.ensure_auth_token();
+                cfg.save()?;
+            }
+            return Ok(cfg);
+        }
+    }
+
+    // No valid config — prompt the user interactively
+    println!("\n🔧 Cloudflare Zero Trust is not configured yet. Let's set it up now.");
+    println!("   (You only need to do this once — credentials are saved to disk.)\n");
+
+    let stdin = io::stdin();
+    let mut lines = stdin.lock().lines();
+
+    let mut prompt = |msg: &str| -> Result<String> {
+        print!("{}", msg);
+        io::stdout().flush()?;
+        Ok(lines.next().context("stdin closed")??
+            .trim()
+            .to_string())
+    };
+
+    let api_token = prompt("  Cloudflare API Token (Zones:Edit + Access:*:Edit + Service Tokens:Edit): ")?;
+    let account_id = prompt("  Cloudflare Account ID: ")?;
+    let domain = prompt("  Domain (e.g. example.com): ")?;
+    let subdomain_input = prompt("  Subdomain [agent]: ")?;
+    let subdomain = if subdomain_input.is_empty() { "agent".to_string() } else { subdomain_input };
+    let tunnel_name = format!("{}-tunnel", domain.split('.').next().unwrap_or("bridge"));
+
+    println!();
+    info!("🚀 Running Cloudflare Zero Trust setup...");
+
+    let client = CloudflareClient::new(api_token.clone(), account_id.clone());
+    let hostname = format!("{}.{}", subdomain, domain);
+
+    info!("📡 Creating tunnel: {}", tunnel_name);
+    let tunnel = client.create_or_get_tunnel(&tunnel_name).await?;
+    info!("✅ Tunnel: {}", tunnel.id);
+
+    info!("🌐 Configuring DNS record for {}", hostname);
+    client.create_dns_record(&domain, &subdomain, &tunnel.id).await?;
+    info!("✅ DNS record ready");
+
+    info!("🔐 Creating Access Application...");
+    let _app = client.create_access_application(&hostname).await?;
+    info!("✅ Access Application ready");
+
+    info!("🎫 Generating Service Token...");
+    let service_token = client.create_service_token(&hostname).await?;
+    info!("✅ Service Token created");
+
+    info!("⚙️  Configuring tunnel ingress...");
+    client.configure_tunnel_ingress(&tunnel.id, &hostname, 8080).await?;
+    info!("✅ Tunnel ingress configured");
+
+    let credentials_path = write_credentials_file(&account_id, &tunnel.id, &tunnel.secret)?;
+    write_cloudflared_config(&tunnel.id, &credentials_path, &hostname, 8080)?;
+
+    let mut cfg = BridgeConfig {
+        hostname: format!("https://{}", hostname),
+        tunnel_id: tunnel.id,
+        tunnel_secret: tunnel.secret,
+        account_id,
+        client_id: service_token.client_id,
+        client_secret: service_token.client_secret,
+        domain,
+        subdomain,
+        auth_token: String::new(),
+        cert_fingerprint: None,
+    };
+    if !no_auth {
+        cfg.ensure_auth_token();
+    }
+    cfg.save()?;
+    info!("✅ Configuration saved to: {}", BridgeConfig::config_path().display());
+
+    Ok(cfg)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -408,23 +496,28 @@ async fn main() -> Result<()> {
                 cfg.save()?;
                 cfg
             } else {
-                let mut cfg = BridgeConfig::load()?;
-                // Ensure auth token exists for loaded config
-                if !no_auth && cfg.auth_token.is_empty() {
-                    cfg.ensure_auth_token();
-                    cfg.save()?;
-                    info!("🔑 Generated new auth token and saved to config");
-                    if verbose {
+                if cloudflare {
+                    // Cloudflare mode: load existing config or run interactive setup
+                    ensure_cloudflare_config(no_auth).await?
+                } else {
+                    let mut cfg = BridgeConfig::load()?;
+                    // Ensure auth token exists for loaded config
+                    if !no_auth && cfg.auth_token.is_empty() {
+                        cfg.ensure_auth_token();
+                        cfg.save()?;
+                        info!("🔑 Generated new auth token and saved to config");
+                        if verbose {
+                            println!("🔐 Relay Token (for Bruno/testing): {}", cfg.auth_token);
+                        }
+                    } else if verbose && !no_auth {
                         println!("🔐 Relay Token (for Bruno/testing): {}", cfg.auth_token);
                     }
-                } else if verbose && !no_auth {
-                    println!("🔐 Relay Token (for Bruno/testing): {}", cfg.auth_token);
+                    cfg
                 }
-                cfg
             };
 
-            // Create pairing manager if QR/pairing is enabled (create once, use for both display and bridge)
-            let pairing_manager = if qr {
+            // In cloudflare mode, always show the QR code (it contains CF secrets + auth token)
+            let pairing_manager = if qr || cloudflare {
                 Some(PairingManager::new(
                     config.hostname.clone(),
                     config.auth_token.clone(),
@@ -509,9 +602,7 @@ async fn main() -> Result<()> {
             // Spawn and manage cloudflared tunnel daemon if requested
             let _cloudflared_runner = if cloudflare {
                 if config.tunnel_id.is_empty() {
-                    anyhow::bail!(
-                        "Tunnel not configured. Run 'bridge setup' first."
-                    );
+                    anyhow::bail!("Cloudflare setup incomplete — tunnel_id missing in config.");
                 }
                 let config_yml = cloudflared_config_path()?;
                 info!("🌐 Starting cloudflared tunnel daemon...");
