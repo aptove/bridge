@@ -73,6 +73,8 @@ pub struct PairingManager {
     expiry_duration: Duration,
     /// Maximum failed attempts before rate limiting
     max_attempts: u32,
+    /// Whether to emit /pair/tailscale instead of /pair/local in the QR URL
+    tailscale_path: bool,
 }
 
 impl PairingManager {
@@ -97,7 +99,14 @@ impl PairingManager {
             client_secret,
             expiry_duration: Duration::from_secs(60),
             max_attempts: 5,
+            tailscale_path: false,
         }
+    }
+
+    /// Mark this manager as using Tailscale transport (emits /pair/tailscale in QR URL)
+    pub fn with_tailscale_path(mut self) -> Self {
+        self.tailscale_path = true;
+        self
     }
 
     /// Get the current pairing code
@@ -111,6 +120,14 @@ impl PairingManager {
         if self.client_id.is_some() {
             // Cloudflare mode: use /pair/cloudflare path, no fingerprint needed
             format!("{}/pair/cloudflare?code={}", base_url, self.code)
+        } else if self.tailscale_path {
+            // Tailscale mode: /pair/tailscale; fingerprint present for ip mode, absent for serve mode
+            let mut url = format!("{}/pair/tailscale?code={}", base_url, self.code);
+            if let Some(ref fp) = self.cert_fingerprint {
+                url.push_str("&fp=");
+                url.push_str(&urlencoding::encode(fp));
+            }
+            url
         } else {
             let mut url = format!("{}/pair/local?code={}", base_url, self.code);
             if let Some(ref fp) = self.cert_fingerprint {
@@ -210,10 +227,12 @@ mod tests {
 
     #[test]
     fn test_pairing_manager_valid_code() {
-        let manager = PairingManager::new(
+        let manager = PairingManager::new_with_cf(
             "wss://192.168.1.100:8080".to_string(),
             "test-token".to_string(),
             Some("SHA256:ABC123".to_string()),
+            None,
+            None,
         );
 
         let code = manager.get_code().to_string();
@@ -227,9 +246,11 @@ mod tests {
 
     #[test]
     fn test_pairing_manager_invalid_code() {
-        let manager = PairingManager::new(
+        let manager = PairingManager::new_with_cf(
             "wss://192.168.1.100:8080".to_string(),
             "test-token".to_string(),
+            None,
+            None,
             None,
         );
 
@@ -239,17 +260,19 @@ mod tests {
 
     #[test]
     fn test_pairing_manager_one_time_use() {
-        let manager = PairingManager::new(
+        let manager = PairingManager::new_with_cf(
             "wss://192.168.1.100:8080".to_string(),
             "test-token".to_string(),
+            None,
+            None,
             None,
         );
 
         let code = manager.get_code().to_string();
-        
+
         // First use should succeed
         assert!(manager.validate(&code).is_ok());
-        
+
         // Second use should fail
         let result = manager.validate(&code);
         assert!(matches!(result, Err(PairingError::CodeAlreadyUsed)));
@@ -257,9 +280,11 @@ mod tests {
 
     #[test]
     fn test_pairing_manager_rate_limiting() {
-        let manager = PairingManager::new(
+        let manager = PairingManager::new_with_cf(
             "wss://192.168.1.100:8080".to_string(),
             "test-token".to_string(),
+            None,
+            None,
             None,
         );
 
@@ -275,14 +300,48 @@ mod tests {
 
     #[test]
     fn test_pairing_url_generation() {
-        let manager = PairingManager::new(
+        let manager = PairingManager::new_with_cf(
             "wss://192.168.1.100:8080".to_string(),
             "test-token".to_string(),
             Some("SHA256:ABC123".to_string()),
+            None,
+            None,
         );
 
         let url = manager.get_pairing_url("https://192.168.1.100:8080");
         assert!(url.starts_with("https://192.168.1.100:8080/pair/local?code="));
         assert!(url.contains("&fp=SHA256"));
+    }
+
+    #[test]
+    fn test_tailscale_serve_pairing_url() {
+        // serve mode: no fingerprint, /pair/tailscale path
+        let manager = PairingManager::new_with_cf(
+            "wss://my-laptop.tail1234.ts.net".to_string(),
+            "test-token".to_string(),
+            None,
+            None,
+            None,
+        ).with_tailscale_path();
+
+        let url = manager.get_pairing_url("https://my-laptop.tail1234.ts.net");
+        assert!(url.contains("/pair/tailscale?code="), "Expected /pair/tailscale in URL, got: {}", url);
+        assert!(!url.contains("&fp="), "serve mode should have no fingerprint");
+    }
+
+    #[test]
+    fn test_tailscale_ip_pairing_url() {
+        // ip mode: fingerprint present, /pair/tailscale path
+        let manager = PairingManager::new_with_cf(
+            "wss://100.64.0.1:8080".to_string(),
+            "test-token".to_string(),
+            Some("SHA256:AB:CD:EF".to_string()),
+            None,
+            None,
+        ).with_tailscale_path();
+
+        let url = manager.get_pairing_url("https://100.64.0.1:8080");
+        assert!(url.contains("/pair/tailscale?code="), "Expected /pair/tailscale in URL, got: {}", url);
+        assert!(url.contains("&fp=SHA256"), "ip mode should include fingerprint");
     }
 }

@@ -572,13 +572,19 @@ async fn main() -> Result<()> {
             // Pairing manager for local/TLS mode (QR with one-time code + cert pinning)
             let pairing_manager = if qr && !cloudflare {
                 let (client_id, client_secret) = (None, None);
-                Some(PairingManager::new_with_cf(
+                let manager = PairingManager::new_with_cf(
                     config.hostname.clone(),
                     config.auth_token.clone(),
                     config.cert_fingerprint.clone(),
                     client_id,
                     client_secret,
-                ))
+                );
+                let manager = if tailscale.is_some() {
+                    manager.with_tailscale_path()
+                } else {
+                    manager
+                };
+                Some(manager)
             } else {
                 None
             };
