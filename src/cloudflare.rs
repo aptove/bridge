@@ -574,13 +574,7 @@ pub fn write_cloudflared_config(
     let config_path = cloudflared_dir.join("config.yml");
     let credentials_str = credentials_path.to_string_lossy();
     let config_content = format!(
-        "tunnel: {tunnel_id}\n\
-         credentials-file: {credentials_str}\n\
-         \n\
-         ingress:\n\
-           - hostname: {hostname}\n\
-             service: http://localhost:{local_port}\n\
-           - service: http_status:404\n"
+        "tunnel: {tunnel_id}\ncredentials-file: {credentials_str}\n\ningress:\n  - hostname: {hostname}\n    service: http://localhost:{local_port}\n  - service: http_status:404\n"
     );
     std::fs::write(&config_path, &config_content)
         .context("Failed to write cloudflared config.yml")?;
