@@ -393,7 +393,20 @@ impl CloudflareClient {
             .context("Failed to parse Service Token response")?;
 
         if !response.success || response.result.is_null() {
-            warn!("Service Token creation failed, deleting existing token and retrying...");
+            // Auth errors can't be resolved by deleting and retrying — surface immediately.
+            if response.errors.iter().any(|e| e.code == 10000) {
+                anyhow::bail!(
+                    "Cloudflare authentication error creating Service Token (code 10000). \
+                     Ensure your API token has 'Access: Service Tokens: Edit' permission. \
+                     Errors: {:?}",
+                    response.errors
+                );
+            }
+
+            warn!(
+                "Service Token creation failed ({}), deleting existing token and retrying...",
+                response.errors.iter().map(|e| format!("{}: {}", e.code, e.message)).collect::<Vec<_>>().join(", ")
+            );
             self.delete_service_token_by_name(&token_name).await?;
 
             let retry: CloudflareResponse = self
