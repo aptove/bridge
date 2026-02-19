@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use reqwest::{Client, header};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 const CLOUDFLARE_API_BASE: &str = "https://api.cloudflare.com/client/v4";
 
@@ -188,14 +188,71 @@ impl CloudflareClient {
             .context("Failed to parse DNS creation response")?;
 
         if !response.success {
-            // Check if record already exists
-            if response.errors.iter().any(|e| e.code == 81057) {
-                warn!("DNS record already exists, continuing...");
-                return Ok(());
+            // Error 81053/81057: record with that name already exists — update it instead
+            if response.errors.iter().any(|e| e.code == 81053 || e.code == 81057) {
+                warn!("DNS record already exists, updating to point to current tunnel...");
+                return self.update_dns_record(&zone_id, subdomain, &tunnel_cname).await;
             }
             anyhow::bail!("Failed to create DNS record: {:?}", response.errors);
         }
 
+        Ok(())
+    }
+
+    /// Find and update an existing DNS CNAME record by name.
+    async fn update_dns_record(&self, zone_id: &str, subdomain: &str, content: &str) -> Result<()> {
+        #[derive(Deserialize)]
+        struct DnsRecord {
+            id: String,
+        }
+
+        let list_url = format!(
+            "{}/zones/{}/dns_records?name={}&type=CNAME",
+            CLOUDFLARE_API_BASE, zone_id, subdomain
+        );
+
+        let list_response: CloudflareResponse<Vec<DnsRecord>> = self
+            .client
+            .get(&list_url)
+            .send()
+            .await
+            .context("Failed to list DNS records")?
+            .json()
+            .await
+            .context("Failed to parse DNS records list")?;
+
+        let record_id = list_response
+            .result
+            .first()
+            .context("DNS record not found for update")?
+            .id
+            .clone();
+
+        let update_url = format!("{}/zones/{}/dns_records/{}", CLOUDFLARE_API_BASE, zone_id, record_id);
+        let payload = serde_json::json!({
+            "type": "CNAME",
+            "name": subdomain,
+            "content": content,
+            "ttl": 1,
+            "proxied": true,
+        });
+
+        let response: CloudflareResponse<serde_json::Value> = self
+            .client
+            .put(&update_url)
+            .json(&payload)
+            .send()
+            .await
+            .context("Failed to update DNS record")?
+            .json()
+            .await
+            .context("Failed to parse DNS update response")?;
+
+        if !response.success {
+            anyhow::bail!("Failed to update DNS record: {:?}", response.errors);
+        }
+
+        info!("✅ DNS record updated to point to current tunnel");
         Ok(())
     }
 
