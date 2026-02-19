@@ -256,7 +256,7 @@ async fn main() -> Result<()> {
             
             println!("\n📱 Scan this QR code with your mobile app to connect.");
             println!("\n⚠️  Important: Keep your configuration file secure. It contains sensitive credentials.");
-            println!("\n🚀 Start the bridge with: bridge start --agent-command \"gemini --experimental-acp\"");
+            println!("\n🚀 Start the bridge with: bridge start --agent-command \"gemini --experimental-acp\" --cloudflare");
         }
         
         Commands::Start { agent_command, port, bind, qr, stdio_proxy, no_auth, no_tls, max_connections_per_ip, max_attempts_per_minute, verbose, keep_alive, session_timeout, max_agents, buffer_messages, push_relay_url, cloudflare, tailscale } => {
