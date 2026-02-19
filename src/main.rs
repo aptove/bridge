@@ -421,7 +421,8 @@ async fn main() -> Result<()> {
             }
 
             // Load or generate TLS config (unless --no-tls, or serve mode where tailscale provides TLS)
-            let tls_config = if no_tls || matches!(tailscale, Some(TailscaleMode::Serve)) {
+            // Cloudflare terminates TLS at its edge; the bridge must serve plain HTTP
+            let tls_config = if no_tls || cloudflare || matches!(tailscale, Some(TailscaleMode::Serve)) {
                 None
             } else {
                 Some(TlsConfig::load_or_generate(&config_dir, &extra_sans)?)

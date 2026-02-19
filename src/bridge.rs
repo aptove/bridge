@@ -215,9 +215,24 @@ where
         return handle_pairing_request(&mut stream, &request_str, pairing_manager).await;
     }
     
+    // Cloudflare (and other proxies) strip the `Connection: upgrade` hop-by-hop header
+    // before forwarding WebSocket upgrade requests to the origin. tungstenite strictly
+    // requires `Connection: upgrade`, so we inject it if `Upgrade: websocket` is present.
+    let lower = request_str.to_ascii_lowercase();
+    let request_bytes = if lower.contains("upgrade: websocket") && !lower.contains("connection: upgrade") {
+        // Insert `Connection: upgrade` after the first header line (after the request line)
+        let mut patched = request_str.to_string();
+        if let Some(pos) = patched.find("\r\n") {
+            patched.insert_str(pos + 2, "Connection: upgrade\r\n");
+        }
+        patched.into_bytes()
+    } else {
+        request_data.to_vec()
+    };
+    
     // Otherwise, it's a WebSocket upgrade - we need to create a stream that
     // "unreads" the data we already consumed
-    let prefixed_stream = PrefixedStream::new(request_data.to_vec(), stream);
+    let prefixed_stream = PrefixedStream::new(request_bytes, stream);
     
     // Continue with WebSocket handling
     handle_websocket_connection(prefixed_stream, agent_command, auth_token, agent_pool, push_relay).await

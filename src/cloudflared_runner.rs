@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
@@ -64,36 +65,53 @@ impl CloudflaredRunner {
             .and_then(|c| c.stderr.take())
             .context("cloudflared stderr not available")?;
 
-        let reader = BufReader::new(stderr);
-        let deadline = Instant::now() + timeout;
-
-        for line in reader.lines() {
-            if Instant::now() > deadline {
-                // Kill the child before returning the error
-                self.kill_child();
-                return Err(anyhow::anyhow!(
-                    "cloudflared did not become ready within {} seconds.\nLast output:\n{}",
-                    timeout.as_secs(),
-                    self.startup_lines.join("\n")
-                ));
+        // Drain stderr in a background thread so cloudflared never gets SIGPIPE.
+        // Send lines back via channel until the ready marker is seen.
+        let (tx, rx) = mpsc::channel::<std::io::Result<String>>();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            // Forward lines to the main thread until the receiver drops
+            for line in &mut lines {
+                if tx.send(line).is_err() {
+                    break; // ready marker found; receiver dropped
+                }
             }
+            // Keep draining stderr so cloudflared never gets SIGPIPE
+            for _ in &mut lines {}
+        });
 
-            match line {
-                Ok(line) => {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(remaining) {
+                Ok(Ok(line)) => {
                     debug!("cloudflared: {}", line);
                     self.startup_lines.push(line.clone());
                     if READY_MARKERS.iter().any(|m| line.contains(m)) {
+                        // Background thread keeps draining stderr; cloudflared stays alive
                         return Ok(());
                     }
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     warn!("Error reading cloudflared stderr: {}", e);
+                    break;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.kill_child();
+                    return Err(anyhow::anyhow!(
+                        "cloudflared did not become ready within {} seconds.\nLast output:\n{}",
+                        timeout.as_secs(),
+                        self.startup_lines.join("\n")
+                    ));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // Thread ended (cloudflared exited before ready marker)
                     break;
                 }
             }
         }
 
-        // Reader exhausted (process exited) before ready marker
         self.kill_child();
         Err(anyhow::anyhow!(
             "cloudflared exited before becoming ready.\nOutput:\n{}",
