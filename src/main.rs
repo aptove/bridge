@@ -158,6 +158,17 @@ async fn ensure_cloudflare_config(no_auth: bool) -> Result<BridgeConfig> {
     // If a valid config already exists (has tunnel and service token), check token health
     if let Ok(mut cfg) = BridgeConfig::load() {
         if !cfg.tunnel_id.is_empty() && !cfg.client_id.is_empty() && !cfg.client_secret.is_empty() {
+            // Ensure credentials file exists and has a valid secret
+            if cfg.tunnel_secret.is_empty() {
+                warn!("⚠️  Tunnel secret is missing from config — credentials are lost.");
+                warn!("   Delete the config and re-run to trigger full re-setup:");
+                warn!("   rm {}", BridgeConfig::config_path().display());
+                anyhow::bail!("Tunnel secret lost. Delete config and re-run.");
+            }
+            // Re-write credentials and config files in case they were deleted or corrupted
+            let credentials_path = write_credentials_file(&cfg.account_id, &cfg.tunnel_id, &cfg.tunnel_secret)?;
+            write_cloudflared_config(&cfg.tunnel_id, &credentials_path, cfg.hostname.trim_start_matches("https://"), 8080)?;
+
             if cfg.service_token_needs_rotation() {
                 if cfg.api_token.is_empty() {
                     warn!("⚠️  Cloudflare service token is expiring soon but no API token is saved.");

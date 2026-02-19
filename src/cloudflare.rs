@@ -104,9 +104,25 @@ impl CloudflareClient {
 
         if response.success {
             let tunnels: Vec<Tunnel> = response.into_result().unwrap_or_default();
-            if let Some(existing) = tunnels.into_iter().find(|t| t.name == name) {
+            if let Some(mut existing) = tunnels.into_iter().find(|t| t.name == name) {
                 debug!("Found existing tunnel: {}", existing.id);
-                return Ok(existing);
+                // Recover the secret from the local credentials file (the API never returns it)
+                if let Ok(dir) = get_cloudflared_dir() {
+                    let creds_path = dir.join(format!("{}.json", existing.id));
+                    if let Ok(content) = std::fs::read_to_string(&creds_path) {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                            if let Some(s) = json.get("TunnelSecret").and_then(|v| v.as_str()) {
+                                if !s.is_empty() {
+                                    existing.secret = s.to_string();
+                                    return Ok(existing);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Secret is lost — delete this tunnel and fall through to create a new one
+                warn!("Tunnel secret is lost for '{}'. Deleting and recreating...", existing.id);
+                let _ = self.delete_tunnel(&existing.id).await;
             }
         }
 
@@ -512,6 +528,27 @@ impl CloudflareClient {
             anyhow::bail!("Failed to configure tunnel ingress: {:?}", response.errors);
         }
 
+        Ok(())
+    }
+
+    /// Delete a tunnel by ID
+    async fn delete_tunnel(&self, tunnel_id: &str) -> Result<()> {
+        let url = format!(
+            "{}/accounts/{}/cfd_tunnel/{}",
+            CLOUDFLARE_API_BASE, self.account_id, tunnel_id
+        );
+        let response: CloudflareResponse = self
+            .client
+            .delete(&url)
+            .send()
+            .await
+            .context("Failed to delete tunnel")?
+            .json()
+            .await
+            .context("Failed to parse tunnel delete response")?;
+        if !response.success {
+            anyhow::bail!("Failed to delete tunnel: {:?}", response.errors);
+        }
         Ok(())
     }
 
