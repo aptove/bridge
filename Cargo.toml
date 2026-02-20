@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Saltuk Alakus <saltukalakus@gmail.com>"]
 description = "A secure bridge between stdio-based ACP agents and mobile apps via Cloudflare Zero Trust"
+repository = "https://github.com/aptove/bridge"
+license = "MIT"
+homepage = "https://github.com/aptove/bridge"
 
 [dependencies]
 # Async runtime
@@ -66,3 +69,8 @@ urlencoding = "2.1"
 [dev-dependencies]
 mockito = "1.2"
 tempfile = "3.10"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
