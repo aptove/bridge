@@ -8,6 +8,7 @@ Use Tailscale as the transport layer for the ACP bridge. This lets you connect f
   - macOS: `brew install tailscale`
   - Linux: follow [tailscale.com/download](https://tailscale.com/download)
 - Machine enrolled in a tailnet: `tailscale up`
+- **Mobile devices must be on the same tailnet** — install the Tailscale app on iOS/Android and sign in to the same Tailscale account before pairing.
 
 ---
 
@@ -77,6 +78,29 @@ wss://100.x.x.x:8080?fingerprint=AB:CD:...
 
 ---
 
+## Mobile Client Pairing
+
+Both iOS and Android apps recognise the `/pair/tailscale` pairing URL emitted when `--tailscale` is active.
+
+### `serve` mode (no fingerprint)
+
+The pairing URL contains no `fp=` parameter because Tailscale provides a valid CA-signed certificate. The app uses standard TLS validation — no certificate pinning needed.
+
+### `ip` mode (with fingerprint)
+
+The pairing URL contains `fp=SHA256:...`. The app pins the self-signed certificate using the fingerprint, exactly like local pairing.
+
+### Manual pairing
+
+If you cannot scan the QR code, open the app's manual pairing screen and select **"Tailscale"** as the connection type:
+
+- **`serve` mode**: enter the MagicDNS hostname (e.g. `my-laptop.tail1234.ts.net`) and the pairing code.
+- **`ip` mode**: enter the Tailscale IP (`100.x.x.x`), port, certificate fingerprint, and pairing code.
+
+> **Note**: The mobile device must be connected to the same tailnet before pairing. Verify with the Tailscale app that the device can reach the bridge host.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -86,3 +110,4 @@ wss://100.x.x.x:8080?fingerprint=AB:CD:...
 | `tailscale serve mode requires MagicDNS + HTTPS` | MagicDNS or HTTPS not enabled | Enable in [Tailscale admin console](https://login.tailscale.com/admin/dns) |
 | `tailscale serve requires Tailscale v1.38+` | Outdated Tailscale installation | Update Tailscale |
 | Certificate changed warning on start | Tailscale IP changed since last cert generation | Expected — cert is regenerated; re-scan QR code on the mobile app |
+| App cannot reach bridge after pairing | Mobile device not on the same tailnet | Open Tailscale app on the phone, ensure it is signed in and connected |
