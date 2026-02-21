@@ -3,27 +3,16 @@ use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use tracing::{info, error, warn};
 
-mod cloudflare;
-mod cloudflared_runner;
-mod bridge;
-mod config;
-mod pairing;
-mod qr;
-mod rate_limiter;
-mod tls;
-mod tailscale;
-mod agent_pool;
-mod push;
-
-use crate::cloudflare::{CloudflareClient, write_credentials_file, write_cloudflared_config, cloudflared_config_path};
-use crate::cloudflared_runner::CloudflaredRunner;
-use crate::bridge::StdioBridge;
-use crate::config::BridgeConfig;
-use crate::pairing::PairingManager;
-use crate::tls::TlsConfig;
-use crate::agent_pool::{AgentPool, PoolConfig};
-use crate::push::PushRelayClient;
-use crate::tailscale::{is_tailscale_available, get_tailscale_ipv4, get_tailscale_hostname, tailscale_serve_start, TailscaleServeGuard};
+use bridge::cloudflare::{CloudflareClient, write_credentials_file, write_cloudflared_config, cloudflared_config_path};
+use bridge::cloudflared_runner::CloudflaredRunner;
+use bridge::bridge::StdioBridge;
+use bridge::config::{self as config, BridgeConfig};
+use bridge::pairing::PairingManager;
+use bridge::tls::TlsConfig;
+use bridge::agent_pool::{self as agent_pool, AgentPool, PoolConfig};
+use bridge::push::PushRelayClient;
+use bridge::qr as qr;
+use bridge::tailscale::{is_tailscale_available, get_tailscale_ipv4, get_tailscale_hostname, tailscale_serve_start, TailscaleServeGuard};
 
 #[derive(Clone, Debug, clap::ValueEnum)]
 enum TailscaleMode {

@@ -8,13 +8,21 @@ repository = "https://github.com/aptove/bridge"
 license = "MIT"
 homepage = "https://github.com/aptove/bridge"
 
+[lib]
+name = "bridge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bridge"
+path = "src/main.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
 tokio-tungstenite = "0.21"
 
 # HTTP client for Cloudflare API
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"] }
 
 # WebSocket support
 futures-util = "0.3"
