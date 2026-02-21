@@ -1,12 +1,15 @@
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
+use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::sync::broadcast;
+use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response, ErrorResponse};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::tungstenite::http::StatusCode;
@@ -17,6 +20,57 @@ use crate::rate_limiter::RateLimiter;
 use crate::tls::TlsConfig;
 use crate::pairing::{PairingManager, PairingError, PairingErrorResponse};
 use crate::push::PushRelayClient;
+
+// ---------------------------------------------------------------------------
+// Webhook support types
+// ---------------------------------------------------------------------------
+
+/// Information about a resolved webhook trigger, returned by the resolver.
+#[derive(Debug, Clone)]
+pub struct WebhookTarget {
+    pub workspace_id: String,
+    pub trigger_id: String,
+    pub trigger_name: String,
+    pub rate_limit_per_minute: u32,
+    pub hmac_secret: Option<String>,
+    pub accepted_content_types: Vec<String>,
+}
+
+/// Async callback used by `StdioBridge` to look up a trigger token.
+///
+/// Implementors (e.g., `agent-bridge`) resolve the token via `TriggerStore`.
+/// Returns `Some(target)` if the token is valid and trigger is enabled,
+/// `None` if unknown or disabled.
+pub type WebhookResolverFn =
+    Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<WebhookTarget>> + Send>> + Send + Sync>;
+
+/// Per-trigger sliding-window rate limiter (used internally by the bridge).
+struct TriggerRateLimiter {
+    /// token → timestamps of recent events (last 60 s)
+    windows: HashMap<String, Vec<Instant>>,
+}
+
+impl TriggerRateLimiter {
+    fn new() -> Self {
+        Self { windows: HashMap::new() }
+    }
+
+    /// Returns `true` if the event is allowed, `false` if rate-limited.
+    fn check_and_record(&mut self, token: &str, limit_per_minute: u32) -> bool {
+        if limit_per_minute == 0 {
+            return true; // unlimited
+        }
+        let now = Instant::now();
+        let window = Duration::from_secs(60);
+        let stamps = self.windows.entry(token.to_string()).or_default();
+        stamps.retain(|t| now.duration_since(*t) < window);
+        if stamps.len() >= limit_per_minute as usize {
+            return false;
+        }
+        stamps.push(now);
+        true
+    }
+}
 
 /// Describes how the bridge connects to the ACP agent backend.
 #[derive(Clone)]
@@ -41,6 +95,10 @@ pub struct StdioBridge {
     pairing_manager: Option<Arc<PairingManager>>,
     agent_pool: Option<Arc<tokio::sync::RwLock<AgentPool>>>,
     push_relay: Option<Arc<PushRelayClient>>,
+    /// Optional resolver for webhook token → trigger mapping.
+    webhook_resolver: Option<WebhookResolverFn>,
+    /// Per-trigger sliding-window rate limiter.
+    webhook_rate_limiter: Arc<Mutex<TriggerRateLimiter>>,
 }
 
 impl StdioBridge {
@@ -55,6 +113,8 @@ impl StdioBridge {
             pairing_manager: None,
             agent_pool: None,
             push_relay: None,
+            webhook_resolver: None,
+            webhook_rate_limiter: Arc::new(Mutex::new(TriggerRateLimiter::new())),
         }
     }
 
@@ -106,6 +166,14 @@ impl StdioBridge {
         self
     }
 
+    /// Enable webhook trigger resolution. When set, incoming `POST /webhook/<token>`
+    /// requests are handled: the resolver is called to look up the trigger, and a
+    /// `triggers/execute` ACP notification is sent to the in-process agent.
+    pub fn with_webhook_resolver(mut self, resolver: WebhookResolverFn) -> Self {
+        self.webhook_resolver = Some(resolver);
+        self
+    }
+
     /// Get a reference to the pairing manager (if enabled)
     #[allow(dead_code)]
     pub fn pairing_manager(&self) -> Option<&Arc<PairingManager>> {
@@ -144,20 +212,22 @@ impl StdioBridge {
         let rate_limiter = Arc::clone(&self.rate_limiter);
         let tls_config = self.tls_config.clone();
         let pairing_manager = self.pairing_manager.clone();
+        let webhook_resolver = self.webhook_resolver.clone();
+        let webhook_rate_limiter = Arc::clone(&self.webhook_rate_limiter);
 
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     // Extract IP for rate limiting
                     let client_ip = addr.ip();
-                    
+
                     // Check rate limits before processing
                     if let Err(e) = rate_limiter.check_connection(client_ip).await {
                         warn!("🚫 Rate limit exceeded for {}: {}", client_ip, e);
                         // Connection will be dropped, client should retry later
                         continue;
                     }
-                    
+
                     info!("📱 New connection from: {}", addr);
                     let agent_handle = self.agent_handle.clone();
                     let auth_token = Arc::clone(&auth_token);
@@ -166,16 +236,19 @@ impl StdioBridge {
                     let pairing_manager = pairing_manager.clone();
                     let agent_pool = self.agent_pool.clone();
                     let push_relay = self.push_relay.clone();
-                    
+                    let webhook_resolver = webhook_resolver.clone();
+                    let webhook_rate_limiter = Arc::clone(&webhook_rate_limiter);
+                    let client_ip_str = addr.ip().to_string();
+
                     tokio::spawn(async move {
                         // Register connection
                         rate_limiter.add_connection(client_ip).await;
-                        
+
                         let result = if let Some(tls) = tls_config {
                             // TLS connection
                             match tls.acceptor.accept(stream).await {
                                 Ok(tls_stream) => {
-                                    handle_connection_generic(tls_stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay).await
+                                    handle_connection_generic(tls_stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay, webhook_resolver, webhook_rate_limiter, client_ip_str).await
                                 }
                                 Err(e) => {
                                     warn!("🚫 TLS handshake failed: {}", e);
@@ -184,12 +257,12 @@ impl StdioBridge {
                             }
                         } else {
                             // Plain TCP connection
-                            handle_connection_generic(stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay).await
+                            handle_connection_generic(stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay, webhook_resolver, webhook_rate_limiter, client_ip_str).await
                         };
-                        
+
                         // Always remove connection when done
                         rate_limiter.remove_connection(client_ip).await;
-                        
+
                         if let Err(e) = result {
                             error!("Connection error: {}", e);
                         }
@@ -206,31 +279,50 @@ impl StdioBridge {
 /// Handle a single connection (generic over stream type for TLS/non-TLS)
 /// This function first peeks at the HTTP request to determine if it's:
 /// 1. A pairing request (/pair/local) - respond with JSON
-/// 2. A WebSocket upgrade request - proceed with WebSocket handling
+/// 2. A webhook request (POST /webhook/<token>) - handle and return immediately
+/// 3. A WebSocket upgrade request - proceed with WebSocket handling
 async fn handle_connection_generic<S>(
-    mut stream: S, 
-    agent_handle: AgentHandle, 
+    mut stream: S,
+    agent_handle: AgentHandle,
     auth_token: Arc<Option<String>>,
     pairing_manager: Option<Arc<PairingManager>>,
     agent_pool: Option<Arc<tokio::sync::RwLock<AgentPool>>>,
     push_relay: Option<Arc<PushRelayClient>>,
+    webhook_resolver: Option<WebhookResolverFn>,
+    webhook_rate_limiter: Arc<Mutex<TriggerRateLimiter>>,
+    client_ip: String,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     // Read the HTTP request headers to determine the request type
-    let mut buffer = vec![0u8; 4096];
+    let mut buffer = vec![0u8; 8192];
     let n = stream.read(&mut buffer).await.context("Failed to read request")?;
     let request_data = &buffer[..n];
-    
+
     // Parse the first line to get the path
     let request_str = String::from_utf8_lossy(request_data);
     let first_line = request_str.lines().next().unwrap_or("");
-    
+
     // Check if this is a pairing request
     if (first_line.contains("/pair/local") || first_line.contains("/pair/cloudflare") || first_line.contains("/pair/tailscale")) && first_line.starts_with("GET") {
         info!("🔗 Pairing request received");
         return handle_pairing_request(&mut stream, &request_str, pairing_manager).await;
+    }
+
+    // Check if this is a webhook request (POST /webhook/<token>)
+    if first_line.starts_with("POST") && first_line.contains("/webhook/") {
+        info!("🪝 Webhook request received");
+        return handle_webhook_request(
+            &mut stream,
+            request_data,
+            &request_str,
+            &agent_handle,
+            webhook_resolver,
+            webhook_rate_limiter,
+            client_ip,
+        )
+        .await;
     }
     
     // Cloudflare (and other proxies) strip the `Connection: upgrade` hop-by-hop header
@@ -314,6 +406,272 @@ where
     }
 
     Ok(())
+}
+
+/// Handle an incoming webhook HTTP POST request.
+///
+/// Flow:
+/// 1. Extract the trigger token from the URL path.
+/// 2. Resolve the token via the optional resolver.
+/// 3. Check per-trigger rate limit.
+/// 4. Optionally verify HMAC-SHA256 signature.
+/// 5. Send `triggers/execute` ACP notification to the in-process agent.
+/// 6. Return 200 OK immediately (fire-and-forget execution).
+#[allow(clippy::too_many_arguments)]
+async fn handle_webhook_request<S>(
+    stream: &mut S,
+    raw_data: &[u8],
+    headers_str: &str,
+    agent_handle: &AgentHandle,
+    resolver: Option<WebhookResolverFn>,
+    rate_limiter: Arc<Mutex<TriggerRateLimiter>>,
+    client_ip: String,
+) -> Result<()>
+where
+    S: AsyncWrite + AsyncRead + Unpin,
+{
+    // --- 1. Extract token from the request line ----------------------------
+    // Format: "POST /webhook/<token> HTTP/1.1"
+    let token = {
+        let line = headers_str.lines().next().unwrap_or("");
+        let path = line.split_whitespace().nth(1).unwrap_or("");
+        let stripped = path.trim_start_matches('/');
+        // stripped = "webhook/<token>"
+        stripped
+            .strip_prefix("webhook/")
+            .map(|t| t.split('?').next().unwrap_or(t).to_string())
+            .unwrap_or_default()
+    };
+
+    if token.is_empty() {
+        let resp = create_http_response(400, "Bad Request", r#"{"error":"missing_token"}"#);
+        stream.write_all(resp.as_bytes()).await?;
+        return Ok(());
+    }
+
+    // --- 2. Resolve the token ---------------------------------------------
+    let Some(ref resolver_fn) = resolver else {
+        let resp = create_http_response(
+            503,
+            "Service Unavailable",
+            r#"{"error":"webhooks_not_configured"}"#,
+        );
+        stream.write_all(resp.as_bytes()).await?;
+        return Ok(());
+    };
+
+    let target = resolver_fn(token.clone()).await;
+
+    let Some(target) = target else {
+        warn!(token = %&token[..token.len().min(12)], "webhook: unknown or disabled token");
+        let resp = create_http_response(404, "Not Found", r#"{"error":"not_found"}"#);
+        stream.write_all(resp.as_bytes()).await?;
+        return Ok(());
+    };
+
+    // --- 3. Per-trigger rate limit ----------------------------------------
+    if target.rate_limit_per_minute > 0 {
+        let allowed = rate_limiter
+            .lock()
+            .await
+            .check_and_record(&token, target.rate_limit_per_minute);
+
+        if !allowed {
+            warn!(trigger = %target.trigger_id, "webhook: rate limit exceeded");
+            let resp = create_http_response(
+                429,
+                "Too Many Requests",
+                r#"{"error":"rate_limited","retry_after":60}"#,
+            );
+            stream.write_all(resp.as_bytes()).await?;
+            return Ok(());
+        }
+    }
+
+    // --- 4. Read the request body -----------------------------------------
+    // Find the end of headers (\r\n\r\n)
+    let header_end = raw_data
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|p| p + 4)
+        .unwrap_or(raw_data.len());
+
+    let already_read = &raw_data[header_end..];
+
+    // Parse Content-Length
+    let content_length: usize = headers_str
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+        .and_then(|l| l.splitn(2, ':').nth(1))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+
+    // Max payload size: 256 KB
+    const MAX_PAYLOAD: usize = 256 * 1024;
+    if content_length > MAX_PAYLOAD {
+        let resp = create_http_response(413, "Payload Too Large", r#"{"error":"payload_too_large"}"#);
+        stream.write_all(resp.as_bytes()).await?;
+        return Ok(());
+    }
+
+    let mut body = already_read.to_vec();
+    while body.len() < content_length {
+        let remaining = content_length - body.len();
+        let read_size = remaining.min(8192);
+        let mut chunk = vec![0u8; read_size];
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..n]);
+    }
+
+    // --- 5. Extract Content-Type and headers for the event ----------------
+    let content_type = headers_str
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("content-type:"))
+        .and_then(|l| l.splitn(2, ':').nth(1))
+        .map(|v| v.trim().to_string())
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+
+    // Collect selected headers for the event payload
+    let mut event_headers: HashMap<String, String> = HashMap::new();
+    for line in headers_str.lines().skip(1) {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = line.splitn(2, ':').collect::<Vec<_>>().as_slice().get(0..2).and_then(|s| Some((s[0], s[1]))) {
+            let key_lower = k.trim().to_ascii_lowercase();
+            // Collect X-* headers and a few standard ones
+            if key_lower.starts_with("x-")
+                || key_lower == "content-type"
+                || key_lower == "user-agent"
+            {
+                event_headers.insert(k.trim().to_string(), v.trim().to_string());
+            }
+        }
+    }
+
+    // --- 6. HMAC verification (optional) ---------------------------------
+    if let Some(ref secret) = target.hmac_secret {
+        if !secret.is_empty() {
+            let sig_header = event_headers
+                .get("X-Hub-Signature-256")
+                .or_else(|| event_headers.get("X-Signature"))
+                .map(|s| s.as_str())
+                .unwrap_or("");
+
+            if sig_header.is_empty() || !verify_hmac_sha256(secret, &body, sig_header) {
+                warn!(trigger = %target.trigger_id, "webhook: HMAC verification failed");
+                let resp =
+                    create_http_response(401, "Unauthorized", r#"{"error":"invalid_signature"}"#);
+                stream.write_all(resp.as_bytes()).await?;
+                return Ok(());
+            }
+        }
+    }
+
+    // --- 7. Convert body to UTF-8 payload string -------------------------
+    let payload = format_payload(&body, &content_type);
+
+    // --- 8. Send triggers/execute ACP notification to the agent ----------
+    let received_at = chrono::Utc::now();
+    let run_id = received_at.format("%Y-%m-%dT%H-%M-%SZ").to_string();
+
+    let notification = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "triggers/execute",
+        "params": {
+            "trigger_id": target.trigger_id,
+            "workspace_id": target.workspace_id,
+            "payload": payload,
+            "content_type": content_type,
+            "headers": event_headers,
+            "received_at": received_at.to_rfc3339(),
+            "source_ip": client_ip,
+        }
+    });
+
+    let notification_bytes = {
+        let mut bytes = serde_json::to_vec(&notification).unwrap_or_default();
+        bytes.push(b'\n');
+        bytes
+    };
+
+    match agent_handle {
+        AgentHandle::InProcess { stdin_tx, .. } => {
+            if let Err(e) = stdin_tx.send(notification_bytes).await {
+                error!(trigger = %target.trigger_id, err = %e, "failed to send triggers/execute to agent");
+            } else {
+                info!(trigger = %target.trigger_id, workspace = %target.workspace_id, "triggers/execute sent to agent");
+            }
+        }
+        AgentHandle::Command(_) => {
+            warn!("webhook received but agent is in Command mode — webhooks require InProcess (serve) mode");
+        }
+    }
+
+    // --- 9. Return 200 OK immediately (async execution) ------------------
+    let response_body = serde_json::json!({
+        "status": "accepted",
+        "run_id": run_id,
+    })
+    .to_string();
+    let resp = create_http_response(200, "OK", &response_body);
+    stream.write_all(resp.as_bytes()).await?;
+
+    Ok(())
+}
+
+/// Verify an HMAC-SHA256 signature.
+/// `signature` is expected in the form `sha256=<hex>` (GitHub style) or plain hex.
+fn verify_hmac_sha256(secret: &str, body: &[u8], signature: &str) -> bool {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    type HmacSha256 = Hmac<Sha256>;
+
+    let expected_hex = signature
+        .strip_prefix("sha256=")
+        .unwrap_or(signature);
+
+    let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    mac.update(body);
+    let result = mac.finalize().into_bytes();
+    let result_hex = hex::encode(result);
+    // Constant-time comparison via simple string equality (sufficient for HMAC)
+    result_hex == expected_hex
+}
+
+/// Convert a raw body to a human-readable string based on Content-Type.
+fn format_payload(body: &[u8], content_type: &str) -> String {
+    let ct = content_type.to_ascii_lowercase();
+    if ct.contains("application/json") {
+        // Pretty-print JSON if valid
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+            return serde_json::to_string_pretty(&v).unwrap_or_else(|_| {
+                String::from_utf8_lossy(body).into_owned()
+            });
+        }
+    } else if ct.contains("application/x-www-form-urlencoded") {
+        // Convert key=value&key2=value2 to readable text
+        return String::from_utf8_lossy(body)
+            .split('&')
+            .map(|pair| {
+                let decoded = pair.replace('+', " ");
+                let mut parts = decoded.splitn(2, '=');
+                let k = parts.next().unwrap_or("");
+                let v = parts.next().unwrap_or("");
+                format!("{}: {}", k, v)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    // Default: raw UTF-8 string
+    String::from_utf8_lossy(body).into_owned()
 }
 
 /// Create an HTTP response with the given status and body

@@ -68,8 +68,10 @@ tokio-rustls = "0.25"
 rustls = "0.22"
 rustls-pemfile = "2.0"
 sha2 = "0.10"
+hmac = "0.12"
 hex = "0.4"
 time = "0.3.36"
+chrono = { version = "0.4", features = ["serde"] }
 
 # URL encoding for pairing URLs
 urlencoding = "2.1"
