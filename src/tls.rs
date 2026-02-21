@@ -128,6 +128,12 @@ impl TlsConfig {
             .context("Failed to serialize certificate to PEM")?;
         let key_pem = cert.serialize_private_key_pem();
 
+        // Ensure the directory exists before writing
+        if let Some(parent) = cert_path.parent() {
+            fs::create_dir_all(parent)
+                .context("Failed to create certificate directory")?;
+        }
+
         // Save to files
         fs::write(cert_path, &cert_pem)
             .context("Failed to write certificate file")?;
