@@ -694,6 +694,8 @@ async fn main() -> Result<()> {
                     let config = BridgeConfig::load()
                         .context("No Cloudflare config found. Run 'bridge setup' first.")?;
                     qr::display_qr_code(&config, "cloudflare")?;
+                }
+                "local" => {
                     let ip = match local_ip_address::local_ip() {
                         Ok(addr) => addr.to_string(),
                         Err(_) => "127.0.0.1".to_string(),
