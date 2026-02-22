@@ -53,7 +53,7 @@ impl BridgeConfig {
         let config_dir_path = if let Some(custom_dir) = CUSTOM_CONFIG_DIR.get() {
             custom_dir.clone()
         } else {
-            let config_dir = directories::ProjectDirs::from("com", "bridge", "bridge")
+            let config_dir = directories::ProjectDirs::from("com", "aptove", "bridge")
                 .expect("Failed to determine config directory");
             config_dir.config_dir().to_path_buf()
         };
