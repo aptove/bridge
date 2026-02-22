@@ -133,7 +133,14 @@ enum Commands {
     },
     
     /// Show connection QR code
-    ShowQr,
+    ShowQr {
+        /// Transport mode: local, cloudflare, or tailscale
+        #[arg(long, value_name = "TRANSPORT", required = true)]
+        transport: String,
+        /// Port for local/tailscale modes (default: 8080)
+        #[arg(long, default_value = "8080")]
+        port: u16,
+    },
     
     /// Check configuration status
     Status,
@@ -682,9 +689,75 @@ async fn main() -> Result<()> {
             bridge.start().await?;
         }
         
-        Commands::ShowQr => {
-            let config = BridgeConfig::load()?;
-            qr::display_qr_code(&config)?;
+        Commands::ShowQr { transport, port } => {
+            let config_dir = BridgeConfig::config_dir();
+            match transport.to_lowercase().as_str() {
+                "cloudflare" => {
+                    let config = BridgeConfig::load()
+                        .context("No Cloudflare config found. Run 'bridge setup' first.")?;
+                    qr::display_qr_code(&config)?;
+                }
+                "local" => {
+                    let ip = match local_ip_address::local_ip() {
+                        Ok(addr) => addr.to_string(),
+                        Err(_) => "127.0.0.1".to_string(),
+                    };
+                    let tls_config = TlsConfig::load_or_generate(&config_dir, &[])?;
+                    let hostname = format!("wss://{}:{}", ip, port);
+                    let mut cfg = BridgeConfig::load().unwrap_or_else(|_| BridgeConfig {
+                        hostname: hostname.clone(),
+                        tunnel_id: String::new(),
+                        tunnel_secret: String::new(),
+                        account_id: String::new(),
+                        client_id: String::new(),
+                        client_secret: String::new(),
+                        domain: String::new(),
+                        subdomain: String::new(),
+                        auth_token: String::new(),
+                        cert_fingerprint: None,
+                        service_token_issued_at: None,
+                        api_token: String::new(),
+                    });
+                    cfg.hostname = hostname;
+                    cfg.cert_fingerprint = Some(tls_config.fingerprint.clone());
+                    cfg.ensure_auth_token();
+                    cfg.save()?;
+                    qr::display_qr_code(&cfg)?;
+                }
+                "tailscale" => {
+                    let ts_ip = get_tailscale_ipv4()
+                        .context("Tailscale is not available or not enrolled. Run 'tailscale up'.")?;
+                    let addr = get_tailscale_hostname()?
+                        .unwrap_or_else(|| ts_ip.clone());
+                    let tls_config = TlsConfig::load_or_generate(&config_dir, &[ts_ip.clone()])?;
+                    let hostname = format!("wss://{}:{}", addr, port);
+                    let mut cfg = BridgeConfig::load().unwrap_or_else(|_| BridgeConfig {
+                        hostname: hostname.clone(),
+                        tunnel_id: String::new(),
+                        tunnel_secret: String::new(),
+                        account_id: String::new(),
+                        client_id: String::new(),
+                        client_secret: String::new(),
+                        domain: String::new(),
+                        subdomain: String::new(),
+                        auth_token: String::new(),
+                        cert_fingerprint: None,
+                        service_token_issued_at: None,
+                        api_token: String::new(),
+                    });
+                    cfg.hostname = hostname;
+                    cfg.cert_fingerprint = Some(tls_config.fingerprint.clone());
+                    cfg.ensure_auth_token();
+                    cfg.save()?;
+                    qr::display_qr_code(&cfg)?;
+                }
+                other => {
+                    anyhow::bail!(
+                        "Unknown transport '{}'. Valid options: local, cloudflare, tailscale",
+                        other
+                    );
+                }
+            }
         }
         
         Commands::Status => {
