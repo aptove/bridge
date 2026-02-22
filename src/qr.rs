@@ -140,7 +140,7 @@ pub fn display_qr_code_with_pairing(config: &BridgeConfig, pairing: &PairingMana
 }
 
 /// Display a QR code in the terminal for mobile scanning (legacy, without pairing)
-pub fn display_qr_code(config: &BridgeConfig) -> Result<()> {
+pub fn display_qr_code(config: &BridgeConfig, transport: &str) -> Result<()> {
     let connection_json = config.to_connection_json()?;
     
     // Render the QR code
@@ -187,13 +187,12 @@ pub fn display_qr_code(config: &BridgeConfig) -> Result<()> {
     }
     
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    
-    // Indicate the connection type
-    if config.client_id.is_empty() {
-        println!("  Mode: Direct WebSocket (local network)");
-    } else {
-        println!("  Mode: Cloudflare Tunnel (internet accessible)");
-    }
+    let mode_label = match transport {
+        "cloudflare" => "Cloudflare Tunnel (internet accessible)",
+        "tailscale"  => "Tailscale (VPN)",
+        _            => "Local Network",
+    };
+    println!("  Mode: {}", mode_label);
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
     
     Ok(())

@@ -377,9 +377,7 @@ async fn main() -> Result<()> {
             
             // Display QR code
             println!("\n🎉 Setup complete!\n");
-            qr::display_qr_code(&config)?;
-            
-            println!("\n📱 Scan this QR code with your mobile app to connect.");
+            qr::display_qr_code(&config, "cloudflare")?;
             println!("\n⚠️  Important: Keep your configuration file secure. It contains sensitive credentials.");
             println!("\n🚀 Start the bridge with: bridge start --agent-command \"gemini --experimental-acp\" --cloudflare");
         }
@@ -669,7 +667,7 @@ async fn main() -> Result<()> {
                 println!("🌐 Cloudflare tunnel active: {}", config.hostname);
                 // Show QR AFTER tunnel is ready — by the time the user scans, the bridge
                 // will already be listening (bridge.start() binds the socket immediately below)
-                qr::display_qr_code(&config)?;
+                qr::display_qr_code(&config, "cloudflare")?;
                 Some(runner)
             } else {
                 None
@@ -695,9 +693,7 @@ async fn main() -> Result<()> {
                 "cloudflare" => {
                     let config = BridgeConfig::load()
                         .context("No Cloudflare config found. Run 'bridge setup' first.")?;
-                    qr::display_qr_code(&config)?;
-                }
-                "local" => {
+                    qr::display_qr_code(&config, "cloudflare")?;
                     let ip = match local_ip_address::local_ip() {
                         Ok(addr) => addr.to_string(),
                         Err(_) => "127.0.0.1".to_string(),
@@ -722,7 +718,7 @@ async fn main() -> Result<()> {
                     cfg.cert_fingerprint = Some(tls_config.fingerprint.clone());
                     cfg.ensure_auth_token();
                     cfg.save()?;
-                    qr::display_qr_code(&cfg)?;
+                    qr::display_qr_code(&cfg, "local")?;
                 }
                 "tailscale" => {
                     let ts_ip = get_tailscale_ipv4()
@@ -749,7 +745,7 @@ async fn main() -> Result<()> {
                     cfg.cert_fingerprint = Some(tls_config.fingerprint.clone());
                     cfg.ensure_auth_token();
                     cfg.save()?;
-                    qr::display_qr_code(&cfg)?;
+                    qr::display_qr_code(&cfg, "tailscale")?;
                 }
                 other => {
                     anyhow::bail!(
