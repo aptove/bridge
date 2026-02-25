@@ -212,7 +212,10 @@ fn build_transport(
     common: &CommonConfig,
     config_dir: &std::path::PathBuf,
 ) -> Result<(String, PairingManager, Option<TlsConfig>, Option<TailscaleServeGuard>, Option<CloudflaredRunner>)> {
-    let port = transport_cfg.port.unwrap_or(8765);
+    // tailscale-serve binds to localhost only and needs its own port so it doesn't
+    // conflict with the local transport that may also be active on 8765.
+    let default_port: u16 = if transport_name == "tailscale-serve" { 8766 } else { 8765 };
+    let port = transport_cfg.port.unwrap_or(default_port);
     let use_tls = transport_cfg.tls.unwrap_or(true);
 
     match transport_name {
@@ -712,64 +715,68 @@ async fn main() -> Result<()> {
                 );
             }
 
+            // When more than one transport is enabled, ask the user to pick one.
+            let (transport_name, transport_cfg) = if enabled.len() == 1 {
+                enabled.into_iter().next().unwrap()
+            } else {
+                println!("\nMultiple transports are enabled. Select one to start:");
+                for (i, (name, _)) in enabled.iter().enumerate() {
+                    println!("  [{}] {}", i + 1, name);
+                }
+                print!("Enter number [1]: ");
+                use std::io::Write as _;
+                std::io::stdout().flush()?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let choice: usize = input.trim().parse().unwrap_or(1);
+                let idx = choice.saturating_sub(1).min(enabled.len() - 1);
+                enabled.into_iter().nth(idx).unwrap()
+            };
+
             let config_dir = CommonConfig::config_dir();
-            let mut bridges: Vec<StdioBridge> = Vec::new();
-            let mut _cloudflared_runners: Vec<CloudflaredRunner> = Vec::new();
-            let mut _tailscale_guards: Vec<TailscaleServeGuard> = Vec::new();
 
-            for (transport_name, transport_cfg) in &enabled {
-                let port = transport_cfg.port.unwrap_or(8765);
-                let (hostname, pm, tls_config, ts_guard, cf_runner) =
-                    build_transport(transport_name, transport_cfg, &config, &config_dir)?;
+            // tailscale-serve defaults to 8766 to avoid conflicting with local (8765).
+            let default_port: u16 = if transport_name == "tailscale-serve" { 8766 } else { 8765 };
+            let port = transport_cfg.port.unwrap_or(default_port);
 
-                if qr {
-                    // For cloudflare: show static JSON QR (pairing flow not applicable)
-                    // For local/tailscale: show pairing URL QR
-                    if transport_name == "cloudflare" {
-                        let json = config.to_connection_json(&hostname, transport_name)?;
-                        qr::display_qr_code(&json, transport_name)?;
-                    } else {
-                        qr::display_qr_code_with_pairing(&hostname, &pm)?;
-                    }
-                }
+            // tailscale-serve proxies from Tailscale edge → localhost, so bind
+            // to 127.0.0.1 only; all other transports use the user-supplied bind addr.
+            let effective_bind = if transport_name == "tailscale-serve" {
+                "127.0.0.1".to_string()
+            } else {
+                bind.clone()
+            };
 
-                info!("📡 Starting WebSocket server on {}:{} (transport: {})", bind, port, transport_name);
-                info!("🤖 Agent command: {}", agent_command);
+            let (hostname, pm, tls_config, _ts_guard, _cf_runner) =
+                build_transport(&transport_name, &transport_cfg, &config, &config_dir)?;
 
-                let mut bridge = StdioBridge::new(agent_command.clone(), port)
-                    .with_bind_addr(bind.clone())
-                    .with_auth_token(Some(config.auth_token.clone()))
-                    .with_pairing(pm);
-
-                if let Some(tls) = tls_config {
-                    info!("🔒 TLS fingerprint: {}", tls.fingerprint_short());
-                    bridge = bridge.with_tls(tls);
-                }
-
-                if let Some(runner) = cf_runner {
-                    _cloudflared_runners.push(runner);
-                }
-                if let Some(guard) = ts_guard {
-                    _tailscale_guards.push(guard);
-                }
-
-                bridges.push(bridge);
-            }
-
-            // Start all bridges concurrently; exit when the first one stops
-            let mut join_set = tokio::task::JoinSet::new();
-            for bridge in bridges {
-                join_set.spawn(async move { bridge.start().await });
-            }
-
-            if let Some(result) = join_set.join_next().await {
-                match result {
-                    Ok(Ok(())) => info!("Bridge transport exited cleanly"),
-                    Ok(Err(e)) => error!("Bridge transport error: {}", e),
-                    Err(e) => error!("Bridge task panicked: {}", e),
+            if qr {
+                if transport_name == "cloudflare" {
+                    let json = config.to_connection_json(&hostname, &transport_name)?;
+                    qr::display_qr_code(&json, &transport_name)?;
+                } else {
+                    qr::display_qr_code_with_pairing(&hostname, &pm)?;
                 }
             }
-            join_set.abort_all();
+
+            info!("📡 Starting WebSocket server on {}:{} (transport: {})", effective_bind, port, transport_name);
+            info!("🤖 Agent command: {}", agent_command);
+
+            let mut bridge = StdioBridge::new(agent_command.clone(), port)
+                .with_bind_addr(effective_bind)
+                .with_auth_token(Some(config.auth_token.clone()))
+                .with_pairing(pm);
+
+            if let Some(tls) = tls_config {
+                info!("🔒 TLS fingerprint: {}", tls.fingerprint_short());
+                bridge = bridge.with_tls(tls);
+            }
+
+            // _ts_guard and _cf_runner live until end of this block (bridge lifetime).
+            match bridge.start().await {
+                Ok(()) => info!("Bridge exited cleanly"),
+                Err(e) => error!("Bridge error: {}", e),
+            }
         }
 
         Commands::ShowQr => {
