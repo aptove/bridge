@@ -1,9 +1,5 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 use tracing::{info, error, warn};
 
 use bridge::cloudflare::{CloudflareClient, write_credentials_file, write_cloudflared_config, cloudflared_config_path};
@@ -11,7 +7,7 @@ use bridge::cloudflared_runner::CloudflaredRunner;
 use bridge::bridge::StdioBridge;
 use bridge::common_config::{self as common_config, CommonConfig, TransportConfig};
 use bridge::config::{self as config, BridgeConfig};
-use bridge::pairing::{PairingManager, PairingError};
+use bridge::pairing::PairingManager;
 use bridge::tls::TlsConfig;
 use bridge::qr as qr;
 use bridge::tailscale::{is_tailscale_available, get_tailscale_ipv4, get_tailscale_hostname, tailscale_serve_start, TailscaleServeGuard};
@@ -334,263 +330,85 @@ fn build_transport(
     }
 }
 
-/// Build a new `PairingManager` for a transport without restarting daemons.
-fn make_pairing_manager(
+/// Probe each enabled transport's listen port to find which one is currently active.
+/// Returns the first transport whose port accepts a TCP connection.
+fn find_active_transport(config: &CommonConfig) -> Option<(String, TransportConfig)> {
+    for (name, cfg) in config.enabled_transports() {
+        let default_port: u16 = if name == "tailscale-serve" { 8766 } else { 8765 };
+        let port = cfg.port.unwrap_or(default_port);
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300))
+            .is_ok()
+        {
+            return Some((name.to_string(), cfg.clone()));
+        }
+    }
+    None
+}
+
+/// Build and display a static connection QR for the given transport.
+///
+/// Reads credentials from `config` and the TLS cert from disk. No server is started.
+fn show_static_qr(
     transport_name: &str,
     transport_cfg: &TransportConfig,
-    common: &CommonConfig,
-    hostname: &str,
-    cert_fingerprint: Option<String>,
-) -> PairingManager {
+    config: &CommonConfig,
+    config_dir: &std::path::PathBuf,
+) -> Result<()> {
+    use serde_json::{Map, Value};
+
+    let default_port: u16 = if transport_name == "tailscale-serve" { 8766 } else { 8765 };
+    let port = transport_cfg.port.unwrap_or(default_port);
+
+    let mut map = Map::new();
+    if !config.agent_id.is_empty() {
+        map.insert("agentId".to_string(), Value::String(config.agent_id.clone()));
+    }
+    map.insert("protocol".to_string(), Value::String("acp".to_string()));
+    map.insert("version".to_string(), Value::String("1.0".to_string()));
+    if !config.auth_token.is_empty() {
+        map.insert("authToken".to_string(), Value::String(config.auth_token.clone()));
+    }
+
     match transport_name {
-        "cloudflare" => PairingManager::new_with_cf(
-            common.agent_id.clone(),
-            hostname.to_string(),
-            common.auth_token.clone(),
-            None,
-            transport_cfg.client_id.clone(),
-            transport_cfg.client_secret.clone(),
-        ),
-        "tailscale-serve" | "tailscale-ip" => PairingManager::new_with_cf(
-            common.agent_id.clone(),
-            hostname.to_string(),
-            common.auth_token.clone(),
-            cert_fingerprint,
-            None,
-            None,
-        )
-        .with_tailscale_path(),
-        _ => PairingManager::new_with_cf(
-            common.agent_id.clone(),
-            hostname.to_string(),
-            common.auth_token.clone(),
-            cert_fingerprint,
-            None,
-            None,
-        ),
-    }
-}
-
-/// Offline registration: start a pairing-only server so the mobile app can register
-/// without the full bridge running. Loops to regenerate the QR on code expiry.
-async fn run_offline_registration(config: &CommonConfig) -> Result<()> {
-    let enabled: Vec<(String, TransportConfig)> = config
-        .enabled_transports()
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
-        .collect();
-
-    if enabled.is_empty() {
-        anyhow::bail!(
-            "No transports are enabled in common.toml.\n\
-             Add at least one transport section with `enabled = true`."
-        );
+        "cloudflare" => {
+            let hostname = transport_cfg.hostname.clone().unwrap_or_default();
+            let url = hostname.replacen("https://", "wss://", 1);
+            map.insert("url".to_string(), Value::String(url));
+            if let Some(id) = transport_cfg.client_id.as_deref().filter(|s| !s.is_empty()) {
+                map.insert("clientId".to_string(), Value::String(id.to_string()));
+            }
+            if let Some(secret) = transport_cfg.client_secret.as_deref().filter(|s| !s.is_empty()) {
+                map.insert("clientSecret".to_string(), Value::String(secret.to_string()));
+            }
+        }
+        "tailscale-serve" => {
+            let ts_hostname = get_tailscale_hostname()?
+                .ok_or_else(|| anyhow::anyhow!("Tailscale MagicDNS hostname not available"))?;
+            map.insert("url".to_string(), Value::String(format!("wss://{}", ts_hostname)));
+        }
+        "tailscale-ip" => {
+            let ts_ip = get_tailscale_ipv4()?;
+            let addr = get_tailscale_hostname()?.unwrap_or_else(|| ts_ip.clone());
+            let tls_config = TlsConfig::load_or_generate(config_dir, &[ts_ip])?;
+            map.insert("url".to_string(), Value::String(format!("wss://{}:{}", addr, port)));
+            map.insert("certFingerprint".to_string(), Value::String(tls_config.fingerprint));
+        }
+        _ => {
+            // "local" and any unknown name
+            let tls_config = TlsConfig::load_or_generate(config_dir, &[])?;
+            let ip = match local_ip_address::local_ip() {
+                Ok(a) => a.to_string(),
+                Err(_) => "127.0.0.1".to_string(),
+            };
+            map.insert("url".to_string(), Value::String(format!("wss://{}:{}", ip, port)));
+            map.insert("certFingerprint".to_string(), Value::String(tls_config.fingerprint));
+        }
     }
 
-    // Select transport — prompt when multiple are available
-    let (transport_name, transport_cfg) = if enabled.len() == 1 {
-        enabled[0].clone()
-    } else {
-        println!("\nSelect a transport for offline registration:");
-        for (i, (name, _)) in enabled.iter().enumerate() {
-            println!("  [{}] {}", i + 1, name);
-        }
-        print!("Enter number [1]: ");
-        use std::io::Write;
-        std::io::stdout().flush()?;
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        let choice: usize = input.trim().parse().unwrap_or(1);
-        let idx = choice.saturating_sub(1).min(enabled.len() - 1);
-        enabled[idx].clone()
-    };
-
-    let config_dir = CommonConfig::config_dir();
-    let port = transport_cfg.port.unwrap_or(8765);
-
-    // Build transport infrastructure once (TLS cert, hostname, optional daemons)
-    let (hostname, _pm_initial, tls_config, _ts_guard, _cf_runner) =
-        build_transport(&transport_name, &transport_cfg, config, &config_dir)?;
-    let tls_arc = tls_config.map(Arc::new);
-    let cert_fingerprint = tls_arc.as_ref().map(|t| t.fingerprint.clone());
-
-    println!("\n📡 Offline registration mode — transport: {}", transport_name);
-    println!("   Mobile app can register now; bridge start is not required yet.\n");
-
-    loop {
-        // Create a fresh PairingManager (new 6-digit code each iteration)
-        let pm = Arc::new(make_pairing_manager(
-            &transport_name,
-            &transport_cfg,
-            config,
-            &hostname,
-            cert_fingerprint.clone(),
-        ));
-
-        // Display QR code
-        qr::display_qr_code_with_pairing(&hostname, &pm)?;
-
-        // Bind TCP listener
-        let addr = format!("0.0.0.0:{}", port);
-        let listener = TcpListener::bind(&addr)
-            .await
-            .with_context(|| format!("Failed to bind pairing server on {}", addr))?;
-        info!("🔗 Pairing server listening on {} for offline registration", addr);
-
-        // Accept connections until pairing succeeds or code expires
-        let paired = run_pairing_server(listener, Arc::clone(&pm), tls_arc.clone()).await;
-
-        if paired {
-            println!("\n✅ Registration complete!");
-            println!("   Start the bridge whenever you're ready:");
-            println!("   bridge start --agent-command \"<your-agent-command>\"");
-            break;
-        }
-
-        // Code expired — offer to regenerate
-        println!("\n⏰ Pairing code expired.");
-        print!("   Generate a new QR? [Y/n]: ");
-        use std::io::Write;
-        std::io::stdout().flush()?;
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        let answer = input.trim().to_ascii_lowercase();
-        if answer == "n" || answer == "no" {
-            break;
-        }
-        println!();
-    }
-
+    let json = serde_json::to_string(&Value::Object(map))?;
+    qr::display_qr_code(&json, transport_name)?;
     Ok(())
-}
-
-/// Accept connections on `listener` until a pairing succeeds or the code expires.
-/// Returns `true` if pairing was completed, `false` on expiry.
-async fn run_pairing_server(
-    listener: TcpListener,
-    pm: Arc<PairingManager>,
-    tls_config: Option<Arc<TlsConfig>>,
-) -> bool {
-    loop {
-        if pm.is_expired() {
-            return false;
-        }
-        if pm.is_used() {
-            return true;
-        }
-
-        let remaining = pm.seconds_remaining();
-        let accept_timeout = Duration::from_secs(remaining.min(2) + 1);
-
-        match tokio::time::timeout(accept_timeout, listener.accept()).await {
-            Ok(Ok((stream, addr))) => {
-                info!("📱 Offline pairing connection from {}", addr);
-                let pm_clone = Arc::clone(&pm);
-                let tls_clone = tls_config.clone();
-                let paired = handle_offline_connection(stream, pm_clone, tls_clone).await;
-                if paired {
-                    return true;
-                }
-            }
-            Ok(Err(e)) => {
-                error!("Accept error on pairing server: {}", e);
-                return false;
-            }
-            Err(_) => {
-                // Poll again — expiry check at top of loop
-            }
-        }
-    }
-}
-
-/// Dispatch a raw TCP stream to the pairing handler, applying TLS if configured.
-async fn handle_offline_connection(
-    stream: tokio::net::TcpStream,
-    pm: Arc<PairingManager>,
-    tls_config: Option<Arc<TlsConfig>>,
-) -> bool {
-    if let Some(tls) = tls_config {
-        match tls.acceptor.accept(stream).await {
-            Ok(tls_stream) => handle_offline_pairing(tls_stream, pm).await,
-            Err(e) => {
-                warn!("TLS handshake failed on offline pairing: {}", e);
-                false
-            }
-        }
-    } else {
-        handle_offline_pairing(stream, pm).await
-    }
-}
-
-/// Read one HTTP request and respond to a pairing endpoint.
-/// Returns `true` if pairing was accepted (code was valid).
-async fn handle_offline_pairing<S>(mut stream: S, pm: Arc<PairingManager>) -> bool
-where
-    S: AsyncReadExt + AsyncWriteExt + Unpin,
-{
-    let mut buf = vec![0u8; 8192];
-    let n = match stream.read(&mut buf).await {
-        Ok(n) => n,
-        Err(_) => return false,
-    };
-    let request = String::from_utf8_lossy(&buf[..n]);
-    let first_line = request.lines().next().unwrap_or("");
-
-    let is_pair_request = first_line.starts_with("GET")
-        && (first_line.contains("/pair/local")
-            || first_line.contains("/pair/cloudflare")
-            || first_line.contains("/pair/tailscale"));
-
-    if !is_pair_request {
-        let resp = http_response(404, "Not Found", r#"{"error":"not_found"}"#);
-        let _ = stream.write_all(resp.as_bytes()).await;
-        return false;
-    }
-
-    // Extract ?code= from the request line
-    let code = first_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|path| path.split('?').nth(1))
-        .and_then(|query| {
-            query
-                .split('&')
-                .find(|p| p.starts_with("code="))
-                .map(|p| p[5..].to_string())
-        });
-
-    let Some(code) = code else {
-        let resp = http_response(400, "Bad Request", r#"{"error":"missing_code"}"#);
-        let _ = stream.write_all(resp.as_bytes()).await;
-        return false;
-    };
-
-    match pm.validate(&code) {
-        Ok(pairing_response) => {
-            let json = serde_json::to_string(&pairing_response).unwrap_or_default();
-            let resp = http_response(200, "OK", &json);
-            let _ = stream.write_all(resp.as_bytes()).await;
-            info!("✅ Offline pairing successful");
-            true
-        }
-        Err(PairingError::RateLimited) => {
-            let resp = http_response(429, "Too Many Requests", r#"{"error":"rate_limited"}"#);
-            let _ = stream.write_all(resp.as_bytes()).await;
-            false
-        }
-        Err(_) => {
-            let resp = http_response(401, "Unauthorized", r#"{"error":"invalid_code"}"#);
-            let _ = stream.write_all(resp.as_bytes()).await;
-            false
-        }
-    }
-}
-
-fn http_response(status: u16, text: &str, body: &str) -> String {
-    format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        status, text, body.len(), body
-    )
 }
 
 #[tokio::main]
@@ -785,55 +603,16 @@ async fn main() -> Result<()> {
             config.ensure_auth_token();
             config.save()?;
 
-            // Detect running bridge by attempting a TCP connection (connect is reliable
-            // on macOS where SO_REUSEADDR makes bind-based detection fail).
-            let local_port = config
-                .transports
-                .get("local")
-                .and_then(|t| t.port)
-                .unwrap_or(8765);
+            let config_dir = CommonConfig::config_dir();
 
-            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], local_port));
-            let is_running = std::net::TcpStream::connect_timeout(
-                &addr,
-                std::time::Duration::from_millis(300),
-            )
-            .is_ok();
-
-            if is_running {
-                // Bridge is running — show static QR with connection details
-                let config_dir = CommonConfig::config_dir();
-                let tls_config = TlsConfig::load_or_generate(&config_dir, &[])?;
-                let ip = match local_ip_address::local_ip() {
-                    Ok(addr) => addr.to_string(),
-                    Err(_) => "127.0.0.1".to_string(),
-                };
-                let hostname = format!("wss://{}:{}", ip, local_port);
-
-                // Build JSON with agentId and cert fingerprint
-                let json = {
-                    use serde_json::{Map, Value};
-                    let mut map = Map::new();
-                    if !config.agent_id.is_empty() {
-                        map.insert("agentId".to_string(), Value::String(config.agent_id.clone()));
-                    }
-                    map.insert("url".to_string(), Value::String(hostname.clone()));
-                    map.insert("protocol".to_string(), Value::String("acp".to_string()));
-                    map.insert("version".to_string(), Value::String("1.0".to_string()));
-                    if !config.auth_token.is_empty() {
-                        map.insert("authToken".to_string(), Value::String(config.auth_token.clone()));
-                    }
-                    map.insert(
-                        "certFingerprint".to_string(),
-                        Value::String(tls_config.fingerprint.clone()),
-                    );
-                    serde_json::to_string(&Value::Object(map))
-                        .context("Failed to build connection JSON")?
-                };
-                qr::display_qr_code(&json, "local")?;
-            } else {
-                // Bridge not running — start offline registration server
-                run_offline_registration(&config).await?;
+            match find_active_transport(&config) {
+                Some((transport_name, transport_cfg)) => {
+                    show_static_qr(&transport_name, &transport_cfg, &config, &config_dir)?;
+                }
+                None => {
+                    println!("Bridge is not running.");
+                    println!("Start it with: bridge start --agent-command \"<your-command>\" --qr");
+                }
             }
         }
 
