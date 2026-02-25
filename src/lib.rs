@@ -4,6 +4,7 @@ pub mod agent_pool;
 pub mod bridge;
 pub mod cloudflare;
 pub mod cloudflared_runner;
+pub mod common_config;
 pub mod config;
 pub mod pairing;
 pub mod push;

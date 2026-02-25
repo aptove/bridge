@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use qrcode::{QrCode, EcLevel};
-use crate::config::BridgeConfig;
 use crate::pairing::PairingManager;
 use std::path::PathBuf;
 
@@ -103,10 +102,13 @@ fn render_qr_code(data: &str) -> Result<String> {
     Ok(output)
 }
 
-/// Display a QR code with pairing URL for secure mobile connection
-pub fn display_qr_code_with_pairing(config: &BridgeConfig, pairing: &PairingManager) -> Result<()> {
+/// Display a QR code with pairing URL for secure mobile connection.
+///
+/// `hostname` is the WebSocket URL (e.g. `wss://192.168.1.1:8765`); it is
+/// converted to HTTPS/HTTP for the pairing endpoint.
+pub fn display_qr_code_with_pairing(hostname: &str, pairing: &PairingManager) -> Result<()> {
     // Build the base URL for pairing (HTTPS)
-    let base_url = config.hostname.replace("wss://", "https://").replace("ws://", "http://");
+    let base_url = hostname.replace("wss://", "https://").replace("ws://", "http://");
     let pairing_url = pairing.get_pairing_url(&base_url);
     
     // Render the QR code
@@ -139,23 +141,27 @@ pub fn display_qr_code_with_pairing(config: &BridgeConfig, pairing: &PairingMana
     Ok(())
 }
 
-/// Display a QR code in the terminal for mobile scanning (legacy, without pairing)
-pub fn display_qr_code(config: &BridgeConfig, transport: &str) -> Result<()> {
-    let connection_json = config.to_connection_json()?;
-    
+/// Display a static QR code in the terminal for mobile scanning (no pairing handshake).
+///
+/// `connection_json` is the pre-built JSON string to encode (e.g. from
+/// `CommonConfig::to_connection_json()` or `BridgeConfig::to_connection_json()`).
+pub fn display_qr_code(connection_json: &str, transport: &str) -> Result<()> {
     // Render the QR code
-    let qr_output = render_qr_code(&connection_json)?;
-    
+    let qr_output = render_qr_code(connection_json)?;
+
     println!("{}", qr_output);
-    
+
     // Parse and pretty-print the QR code content
-    let json_value: serde_json::Value = serde_json::from_str(&connection_json)
+    let json_value: serde_json::Value = serde_json::from_str(connection_json)
         .context("Failed to parse connection JSON")?;
     
     println!("QR Code Content:");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     
     // Print each field with appropriate masking for sensitive data
+    if let Some(agent_id) = json_value.get("agentId").and_then(|v| v.as_str()) {
+        println!("  Agent ID:        {}", agent_id);
+    }
     if let Some(url) = json_value.get("url").and_then(|v| v.as_str()) {
         println!("  URL:             {}", url);
     }

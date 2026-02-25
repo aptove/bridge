@@ -8,13 +8,18 @@ A bridge between stdio-based Agent Client Protocol (ACP) agents and mobile appli
 |------|----------|---------------|
 | **Local** | Same Wi-Fi network, secure pairing with QR code | [docs/transport/local.md](docs/transport/local.md) |
 | **Cloudflare** | Remote access via Cloudflare Zero Trust (internet-accessible) | [docs/transport/cloudflare.md](docs/transport/cloudflare.md) |
-| **Tailscale** | Private overlay network (serve: MagicDNS+HTTPS; ip: direct Tailscale IP) | [docs/transport/tailscale.md](docs/transport/tailscale.md) |
+| **Tailscale Serve** | Private overlay network via MagicDNS + HTTPS | [docs/transport/tailscale.md](docs/transport/tailscale.md) |
+| **Tailscale IP** | Direct Tailscale IP with self-signed TLS | [docs/transport/tailscale.md](docs/transport/tailscale.md) |
+
+Multiple transports can run simultaneously — the bridge starts one listener per enabled transport.
 
 ## Features
 
 - 📱 **QR Code Pairing**: Secure one-time code pairing via QR scan
 - 🔒 **TLS + Certificate Pinning**: Self-signed certificates with fingerprint validation
 - ⚡ **WebSocket Streaming**: Real-time bidirectional communication
+- 🌐 **Multi-Transport**: Local, Cloudflare, Tailscale — all at once
+- 🔑 **Stable Agent Identity**: `agent_id` UUID persisted in `common.toml` for multi-transport dedup on mobile
 - 🦀 **Rust Performance**: Low-latency, high-throughput implementation
 
 ## Quick Start
@@ -23,175 +28,162 @@ A bridge between stdio-based Agent Client Protocol (ACP) agents and mobile appli
 # Build
 cargo build --release
 
-# Start with GitHub Copilot
-./target/release/acp-cloudflare-bridge start \
-  --agent-command "copilot --acp" \
-  --port 8080 \
-  --stdio-proxy \
+# Start with local transport (default — no config needed)
+./target/release/bridge start \
+  --agent-command "gemini --experimental-acp" \
   --qr
-
-# Start with session persistence (keep agent alive on disconnect)
-./target/release/acp-cloudflare-bridge start \
-  --agent-command "copilot --acp" \
-  --port 8080 \
-  --stdio-proxy \
-  --qr \
-  --keep-alive \
-  --session-timeout 3600
 ```
 
-Scan the QR code with the Aptove iOS app to connect.
+Scan the QR code with the Aptove mobile app to connect.
 
-📖 **For detailed setup, security information, and troubleshooting, see [Local Transport Documentation](docs/transport/local.md).**
+## Configuration — `common.toml`
+
+All transport settings live in `common.toml`. The file is created automatically with local transport enabled on first run.
+
+**Default location:**
+- macOS: `~/Library/Application Support/com.aptove.bridge/common.toml`
+- Linux: `~/.config/bridge/common.toml`
+
+Override with `--config-dir`:
+```bash
+bridge --config-dir ./my-config start --agent-command "gemini --experimental-acp"
+```
+
+### Example `common.toml`
+
+```toml
+agent_id  = "550e8400-e29b-41d4-a716-446655440000"  # auto-generated UUID
+auth_token = "base64urltoken"                        # auto-generated
+
+[transports.local]
+enabled = true
+port    = 8765
+tls     = true
+
+[transports.cloudflare]
+enabled       = true
+hostname      = "https://agent.example.com"
+tunnel_id     = "abc123"
+tunnel_secret = "..."
+account_id    = "..."
+client_id     = "client.access"
+client_secret = "xxxxx"
+
+[transports.tailscale-serve]
+enabled = true
+
+[transports.tailscale-ip]
+enabled = true
+port    = 8765
+tls     = true
+```
+
+Enable only the transports you need. `agent_id` and `auth_token` are generated automatically on first run and stay stable across restarts.
+
+## Commands
+
+### `start` — Run the bridge
+
+```bash
+bridge start --agent-command "<your-agent-command>"
+```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--agent-command <CMD>` | Command to spawn the ACP agent | Required |
+| `--bind <ADDR>` | Address to bind all listeners | `0.0.0.0` |
+| `--qr` | Display QR code(s) for pairing at startup | Off |
+| `--verbose` | Enable info-level logging | Off (warn only) |
+
+Transport selection, ports, TLS, and auth tokens are all read from `common.toml`.
+
+### `show-qr` — Show QR code
+
+```bash
+bridge show-qr
+```
+
+- **Bridge running**: displays a static QR with connection credentials for the active local transport.
+- **Bridge not running**: starts an offline registration server — shows pairing QR, waits for a mobile device to complete pairing, then exits. Useful for pre-registering a device before starting the bridge.
+
+### `setup` — Provision Cloudflare infrastructure
+
+```bash
+bridge setup \
+  --api-token  "your-api-token" \
+  --account-id "your-account-id" \
+  --domain     "example.com" \
+  --subdomain  "agent"
+```
+
+Creates the Cloudflare tunnel, DNS record, Access Application, and Service Token. Saves credentials to `common.toml` under `[transports.cloudflare]`. Only needed once.
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--api-token <TOKEN>` | Cloudflare API token | Required |
+| `--account-id <ID>` | Cloudflare account ID | Required |
+| `--domain <DOMAIN>` | Domain managed by Cloudflare | Required |
+| `--subdomain <SUB>` | Subdomain for the bridge endpoint | `agent` |
+| `--tunnel-name <NAME>` | Name for the Cloudflare tunnel | `aptove-tunnel` |
+
+### `status` — Check configuration
+
+```bash
+bridge status
+```
+
+Prints the active `common.toml` path, `agent_id`, enabled transports, and Tailscale availability.
 
 ## Architecture
 
 ```
-┌─────────────┐                    ┌─────────────┐        ┌──────────────┐
-│   iPhone    │◄──────────────────►│   Bridge    │◄──────►│  ACP Agent   │
-│   App       │  WebSocket (LAN)   │   (Rust)    │  stdio │  (Copilot)   │
-└─────────────┘                    └─────────────┘        └──────────────┘
+┌─────────────┐                    ┌──────────────────────┐        ┌──────────────┐
+│  Mobile App │◄──────────────────►│  Bridge (per-transport│◄──────►│  ACP Agent   │
+│ (iOS/Android│  WebSocket (TLS)   │  local / CF / TS)    │  stdio │  (your cmd)  │
+└─────────────┘                    └──────────────────────┘        └──────────────┘
 ```
 
-## Command Options
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--agent-command <CMD>` | Command to spawn the ACP agent | Required |
-| `--port <PORT>` | Local WebSocket port | `8080` |
-| `--bind <ADDR>` | Address to bind | `0.0.0.0` |
-| `--stdio-proxy` | Enable stdio proxy mode | Required |
-| `--qr` | Display QR code for pairing | Off |
-| `--no-auth` | Disable authentication | Auth enabled |
-| `--no-tls` | Disable TLS encryption | TLS enabled |
-| `--max-connections-per-ip <N>` | Max concurrent connections per IP | `3` |
-| `--max-attempts-per-minute <N>` | Max connection attempts per minute per IP | `10` |
-| `--keep-alive` | Keep agent processes alive when clients disconnect | Off |
-| `--session-timeout <SECS>` | Idle timeout before killing disconnected agents | `1800` (30 min) |
-| `--max-agents <N>` | Maximum concurrent agent processes | `10` |
-| `--buffer-messages` | Buffer agent messages while client is disconnected | Off |
-| `--config-dir <PATH>` | Custom configuration directory | System default |
-
-## Session Persistence (Keep-Alive)
-
-With `--keep-alive`, agent processes remain alive during temporary disconnections (network switches, app backgrounding), enabling seamless session resumption. The bridge intercepts re-initialization requests on reconnect to preserve full conversation context.
-
-📖 **For detailed architecture, reconnection flow, and troubleshooting, see [Persistent Sessions Documentation](docs/session/persistent-session.md).**
+Multiple transport listeners share the same agent process.
 
 ## Troubleshooting
-
-> **Session persistence issues?** See the [Persistent Sessions Troubleshooting](docs/session/persistent-session.md#troubleshooting) guide.
 
 ### Connection Issues
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| QR code not scanning | Phone camera can't read terminal QR | Try `--qr` flag to save as image file |
-| "Unauthorized" on connect | Wrong or missing auth token | Re-scan QR code; check `X-Bridge-Token` header |
-| TLS handshake failure | Certificate mismatch | Delete config dir and restart to regenerate certs; re-pair device |
-| "Rate limit exceeded" | Too many connection attempts | Wait 60 seconds; adjust `--max-attempts-per-minute` |
-| Connection drops on Wi-Fi switch | TCP connection broken by network change | Enable `--keep-alive` for automatic session resumption |
+| QR code not scanning | Phone camera can't read terminal QR | Increase terminal font size, or copy the pairing URL and open manually |
+| "Unauthorized" on connect | Wrong or missing auth token | Re-scan QR code |
+| TLS handshake failure | Certificate mismatch | Delete the config dir and restart to regenerate certs; re-pair the device |
+| App cannot reach bridge | Firewall blocking the port | Check OS firewall; ensure the port in `common.toml` is open |
+| All transports fail to start | `common.toml` has no `enabled = true` transport | Run `bridge status` to see configured transports |
 
 ### Debugging
 
 ```bash
-# Enable verbose logging to see all bridge activity
-./target/release/bridge start --agent-command "copilot --acp" --stdio-proxy --verbose
+# Enable verbose logging
+bridge start --agent-command "gemini --experimental-acp" --verbose
 
-# Check pool stats in verbose mode (logged every 60s when agents exist)
-# Look for: "AgentPool stats: 2/10 agents (1 connected, 1 idle)"
+# Check which transports are configured
+bridge status
 
 # Test agent command independently
-echo '{"jsonrpc":"2.0","method":"initialize","id":1}' | copilot --acp
+echo '{"jsonrpc":"2.0","method":"initialize","id":1}' | gemini --experimental-acp
 ```
 
-## Security Considerations
+## Security
 
-### Authentication
+- **Auth token**: auto-generated 32-byte random value, stored in `common.toml` (`0600`). Transmitted to mobile during QR pairing and stored in the device Keychain.
+- **TLS**: self-signed certificate generated on first run. Certificate fingerprint is included in the QR pairing payload and pinned by the mobile app to prevent MITM attacks.
+- **Pairing codes**: 6-digit, single-use, expire after 60 seconds. Rate-limited to 5 attempts per code.
+- **`common.toml`**: contains all secrets. Permissions are set to `0600` automatically. Keep it secure.
 
-- **Always use authentication in production.** The `--no-auth` flag is for development only.
-- Auth tokens are generated using cryptographically secure random bytes (32 bytes, hex-encoded).
-- Tokens are persisted in the bridge config file — protect this file with appropriate permissions.
-- The token is transmitted via the QR code during initial pairing and stored securely on the mobile device.
-
-### TLS / Certificate Pinning
-
-- The bridge generates self-signed TLS certificates on first run.
-- A SHA-256 certificate fingerprint is included in the QR code for pinning.
-- Mobile clients validate the fingerprint on every connection, preventing MITM attacks.
-- Use `--no-tls` **only** for local development behind a trusted network.
-
-### Session Persistence Security
-
-Sessions are isolated by auth token with idle timeouts and max-agent limits. See [Persistent Sessions — Security](docs/session/persistent-session.md#security) for details.
-
-### Rate Limiting
-
-- Per-IP connection limits prevent brute-force and denial-of-service attacks.
-- Default: 3 concurrent connections and 10 attempts per minute per IP.
-- Pairing codes are single-use and rate-limited to prevent enumeration.
-
-### Recommendations
-
-1. Always run with TLS enabled (default).
-2. Use `--keep-alive` with a reasonable `--session-timeout` (default 30 min).
-3. Set `--max-agents` to match expected concurrent users.
-4. Restrict `--bind` to `127.0.0.1` if only local connections are needed.
-5. Rotate auth tokens periodically by deleting the config and re-pairing.
-
-## Config Location
-
-The bridge stores configuration in `config.json` which includes:
-- TLS certificate fingerprint
-- Authentication token (relay token)
-- Connection settings
-
-### Default Paths
-
-Determined by the `directories` crate with package identifier `com.bridge.bridge`:
-
-- **macOS**: `~/Library/Application Support/com.bridge.bridge/config.json`
-- **Linux**: `~/.config/bridge/config.json`
-- **Windows**: `%APPDATA%\bridge\bridge\config\config.json`
-
-### Custom Location
-
-Override with `--config-dir`:
-```bash
-./target/release/bridge --config-dir ./my-config start --agent-command "copilot --acp" --qr
-```
-
-### Rotating Credentials
-
-To generate a new relay token and invalidate old device registrations:
+To rotate credentials (invalidates all paired devices):
 
 ```bash
-# Delete config file
-rm -f ~/Library/Application\ Support/com.bridge.bridge/config.json  # macOS
-rm -f ~/.config/bridge/config.json                                   # Linux
-
-# Restart bridge - generates new token
-./target/release/bridge start --agent-command "copilot --acp" --qr --verbose
-```
-
-The new relay token will be printed with `--verbose` mode.
-
-**Note**: Deleting the config also regenerates TLS certificates, requiring device re-pairing.
-
-## Claude Code Integration
-
-echo '{"model": "sonnet"}' > ~/.claude/settings.json
-
-# Then run bridge
-export ANTHROPIC_API_KEY=sk-ant-your-key
-./target/release/bridge start \
-  --agent-command "claude-code-acp" \
-  --port 8080 \
-  --stdio-proxy \
-  --qr \
-  --keep-alive \
-  --verbose \
-  --session-timeout 3600
+# Delete config and restart — new agent_id, auth_token, and TLS cert are generated
+rm ~/Library/Application\ Support/com.aptove.bridge/common.toml   # macOS
+rm ~/.config/bridge/common.toml                                    # Linux
+bridge start --agent-command "..." --qr
 ```
 
 ## Development
@@ -203,4 +195,4 @@ cargo test               # Run tests
 
 ## License
 
-Apache 2.0 - see [LICENSE](LICENSE)
+Apache 2.0 — see [LICENSE](LICENSE)

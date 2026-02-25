@@ -1,6 +1,6 @@
 # Local Transport
 
-The local transport enables secure connections between client apps (iOS, Android, desktop) and the bridge running on the same local network. This is ideal for development, local-first deployments, and scenarios where Cloudflare tunnels aren't needed.
+The local transport enables secure connections between client apps (iOS, Android, desktop) and the bridge running on the same local network. This is ideal for development, local-first deployments, and scenarios where Cloudflare tunnels or Tailscale aren't needed.
 
 ## Overview
 
@@ -18,22 +18,43 @@ The local transport enables secure connections between client apps (iOS, Android
         ▼                                            ▼
 ```
 
+---
+
+## Configuration
+
+Local transport is enabled by default. To customise, edit `common.toml`:
+
+```toml
+[transports.local]
+enabled = true
+port    = 8765    # default: 8765
+tls     = true    # default: true
+```
+
+**Config file location:**
+- macOS: `~/Library/Application Support/com.aptove.bridge/common.toml`
+- Linux: `~/.config/bridge/common.toml`
+
+---
+
 ## Starting the Bridge
 
 ```bash
-bridge start --agent-command "your-agent-command" --stdio-proxy --qr
+bridge start --agent-command "gemini --experimental-acp" --qr
 ```
 
-### Options
+The bridge reads port, TLS, and auth token settings from `common.toml` — no flags needed.
 
-| Flag | Description |
-|------|-------------|
-| `--stdio-proxy` | Run in local mode (no Cloudflare) |
-| `--qr` | Display QR code for mobile pairing |
-| `--port <PORT>` | WebSocket port (default: 8080) |
-| `--bind <ADDR>` | Bind address (default: 0.0.0.0) |
-| `--no-auth` | Disable authentication (NOT recommended) |
-| `--no-tls` | Disable TLS (NOT recommended) |
+**Available `start` flags:**
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--agent-command <CMD>` | Command to spawn the ACP agent | Required |
+| `--bind <ADDR>` | Bind address | `0.0.0.0` |
+| `--qr` | Display QR code for mobile pairing | Off |
+| `--verbose` | Enable info-level logging | Off |
+
+---
 
 ## Pairing Flow
 
@@ -50,7 +71,7 @@ When started with `--qr`, the bridge displays:
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   📱 Scan QR code with your mobile app
-  🔗 https://192.168.1.100:8080/pair/local?code=847291&fp=SHA256%3A...
+  🔗 https://192.168.1.100:8765/pair/local?code=847291&fp=SHA256%3A...
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
@@ -64,25 +85,26 @@ https://<IP>:<PORT>/pair/local?code=<PAIRING_CODE>&fp=<TLS_FINGERPRINT>
 
 | Parameter | Description |
 |-----------|-------------|
-| `code` | 6-digit one-time pairing code |
+| `code` | 6-digit one-time pairing code (expires in 60 seconds) |
 | `fp` | SHA256 fingerprint of the TLS certificate (URL-encoded) |
 
 ### 3. Pairing Endpoint
 
 **Request:**
 ```
-GET /pair/local?code=847291&fp=SHA256:ABCD...
-Host: 192.168.1.100:8080
+GET /pair/local?code=847291
+Host: 192.168.1.100:8765
 ```
 
 **Success Response (200 OK):**
 ```json
 {
-  "url": "wss://192.168.1.100:8080",
-  "protocol": "acp",
-  "version": "1.0",
-  "authToken": "base64-encoded-token",
-  "certFingerprint": "SHA256:ABCD1234..."
+  "agentId":        "550e8400-e29b-41d4-a716-446655440000",
+  "url":            "wss://192.168.1.100:8765",
+  "protocol":       "acp",
+  "version":        "1.0",
+  "authToken":      "base64urltoken",
+  "certFingerprint":"SHA256:ABCD1234..."
 }
 ```
 
@@ -93,13 +115,15 @@ Host: 192.168.1.100:8080
 | 401 | `invalid_code` | Code is wrong, expired, or already used |
 | 429 | `rate_limited` | Too many failed attempts (5 max) |
 
+`agentId` is a stable UUID that lets the mobile app recognise the same agent across multiple transports — scanning a second transport's QR adds a new endpoint instead of creating a duplicate agent entry.
+
 ### 4. WebSocket Connection
 
-After successful pairing, connect to the WebSocket URL with the auth token:
+After pairing, connect to the WebSocket URL with the auth token:
 
 ```
 GET / HTTP/1.1
-Host: 192.168.1.100:8080
+Host: 192.168.1.100:8765
 Upgrade: websocket
 Connection: Upgrade
 X-Bridge-Token: <authToken>
@@ -107,8 +131,22 @@ X-Bridge-Token: <authToken>
 
 Or via query parameter:
 ```
-wss://192.168.1.100:8080?token=<authToken>
+wss://192.168.1.100:8765?token=<authToken>
 ```
+
+---
+
+## Offline Registration (`show-qr` without the bridge running)
+
+You can pre-register a mobile device before starting the full bridge:
+
+```bash
+bridge show-qr
+```
+
+If the bridge is not running, this starts a lightweight pairing-only server, shows a QR code, waits for the mobile app to complete the handshake, then exits. The bridge doesn't need to be running to complete pairing.
+
+---
 
 ## Security Design
 
@@ -116,87 +154,61 @@ wss://192.168.1.100:8080?token=<authToken>
 
 | Property | Value | Purpose |
 |----------|-------|---------|
-| Length | 6 digits | Easy to type if needed |
+| Length | 6 digits | Easy to type manually if needed |
 | Expiry | 60 seconds | Limits exposure window |
-| Usage | One-time | Prevents replay attacks |
+| Usage | Single-use | Prevents replay attacks |
 | Attempts | 5 max | Prevents brute-force |
-
-**Brute-force analysis:**
-- 6 digits = 1,000,000 combinations
-- 5 attempts in 60 seconds = negligible success probability
-- After 5 failures, code is invalidated
 
 ### TLS Certificate Pinning
 
-The bridge uses a self-signed TLS certificate. To prevent MITM attacks:
+The bridge generates a self-signed TLS certificate on first run. The certificate fingerprint is included in the QR pairing URL and must be validated by the mobile app before trusting the connection.
 
-1. **Certificate fingerprint is embedded in the QR code URL**
-2. **Client apps MUST validate the fingerprint** before trusting the connection
+### Credentials and Auth Token
 
-**Client implementation (pseudo-code):**
-```swift
-// iOS/Swift example
-func validateCertificate(serverCert: SecCertificate, expectedFingerprint: String) -> Bool {
-    let serverFingerprint = sha256Fingerprint(of: serverCert)
-    return serverFingerprint == expectedFingerprint
-}
+`auth_token` is auto-generated (32 bytes, URL-safe base64) and stored in `common.toml` with `0600` permissions. It persists across restarts — paired devices reconnect without re-scanning.
+
+### Rotating Credentials
+
+To regenerate `auth_token`, `agent_id`, and TLS cert (invalidates all paired devices):
+
+```bash
+rm ~/Library/Application\ Support/com.aptove.bridge/common.toml   # macOS
+rm ~/.config/bridge/common.toml                                    # Linux
+bridge start --agent-command "..." --qr
 ```
 
-### Why Self-Signed?
+---
 
-- **Let's Encrypt requires public domain validation** - not possible for local IPs
-- **Certificate pinning is MORE secure** than CA validation when you know the expected cert
-- **No external dependencies** - works offline and in air-gapped environments
-
-## Client Implementation Guide
-
-### Mobile Apps (QR Scan Flow)
-
-1. **Scan QR code** → Extract URL
-2. **Parse URL** → Get `code` and `fp` parameters
-3. **Create HTTPS request** with custom certificate validation:
-   - Extract server certificate fingerprint
-   - Compare with `fp` from URL
-   - Reject if mismatch (potential MITM)
-4. **Call pairing endpoint** → Receive credentials
-5. **Store credentials** securely
-6. **Connect WebSocket** with auth token
-
-### Desktop Apps
-
-Since desktop apps can't scan QR codes from their own screen:
-
-1. **Read the URL** from terminal output
-2. **Make HTTPS request** with certificate pinning
-3. **Connect WebSocket** with received credentials
-
-### Manual Testing with curl
+## Manual Testing with curl
 
 ```bash
 # Note: -k disables cert verification (for testing only)
-curl -k "https://192.168.1.100:8080/pair/local?code=847291"
+curl -k "https://192.168.1.100:8765/pair/local?code=847291"
 ```
+
+---
 
 ## Troubleshooting
 
 ### "Connection refused"
-- Ensure bridge is running
-- Check firewall settings allow port 8080
-- Verify IP address is correct
+- Ensure the bridge is running
+- Check firewall settings allow the configured port (default `8765`)
+- Run `bridge status` to confirm the port and IP
 
 ### "Invalid code"
-- Code expires after 60 seconds - restart bridge for new code
-- Code can only be used once
-- Check for typos if entering manually
+- Codes expire after 60 seconds — re-run `bridge start --qr` to get a fresh code
+- Codes are single-use — scan only once
+- Check for typos if entering the code manually
 
 ### "Rate limited"
-- Too many failed attempts
-- Restart bridge to get a fresh code
+- Too many failed pairing attempts on the current code
+- Restart the bridge to issue a fresh code
 
 ### Certificate errors
-- Mobile apps must implement certificate pinning
-- Don't blindly trust all self-signed certs
-- Compare fingerprint from QR with server's actual cert
+- Mobile apps must validate the fingerprint from the QR code `fp` parameter
+- The fingerprint is per-certificate — if you delete `common.toml` and restart, the cert changes and you must re-pair
+
+---
 
 ## Architecture
 
@@ -205,7 +217,7 @@ curl -k "https://192.168.1.100:8080/pair/local?code=847291"
 │                         Bridge                               │
 │  ┌─────────────┐  ┌──────────────┐  ┌───────────────────┐   │
 │  │   TLS       │  │   Pairing    │  │    WebSocket      │   │
-│  │   Server    │──│   Manager    │──│    Handler        │   │
+│  │   Server    │──│   Manager   │──│    Handler        │   │
 │  │             │  │              │  │                   │   │
 │  │ Self-signed │  │ - Code gen   │  │ - Auth validation │   │
 │  │ certificate │  │ - Validation │  │ - Message routing │   │
@@ -214,7 +226,7 @@ curl -k "https://192.168.1.100:8080/pair/local?code=847291"
 │         │                │                    │              │
 │         └────────────────┴────────────────────┘              │
 │                          │                                   │
-│                    Port 8080                                 │
+│                    Port 8765 (default)                       │
 └─────────────────────────────────────────────────────────────┘
                            │
               ┌────────────┼────────────┐
@@ -223,24 +235,12 @@ curl -k "https://192.168.1.100:8080/pair/local?code=847291"
          (HTTP GET)     Upgrade      Requests
 ```
 
-## Configuration
+## Comparison with Other Transports
 
-### Environment Variables
-
-None required for local mode.
-
-### Persistent Data
-
-- **TLS Certificate**: `~/.config/bridge/cert.pem`
-- **TLS Private Key**: `~/.config/bridge/key.pem`
-- **Auth Token**: Generated per session (not persisted in local mode)
-
-## Comparison with Cloudflare Transport
-
-| Feature | Local | Cloudflare |
-|---------|-------|------------|
-| Internet access | ❌ Same network only | ✅ Anywhere |
-| Setup complexity | ✅ None | ⚠️ Requires account |
-| Latency | ✅ Minimal | ⚠️ Tunnel overhead |
-| TLS certificate | Self-signed | Cloudflare managed |
-| Use case | Development, local | Production, remote |
+| Feature | Local | Cloudflare | Tailscale |
+|---------|-------|------------|-----------|
+| Internet access | ❌ Same network only | ✅ Anywhere | ✅ Tailnet |
+| Setup complexity | ✅ None | ⚠️ One-time account setup | ⚠️ Tailscale required |
+| Latency | ✅ Minimal | ⚠️ Tunnel overhead | ✅ Minimal (direct) |
+| TLS certificate | Self-signed (pinned) | Cloudflare managed | Tailscale managed (serve) / self-signed (ip) |
+| Best for | Development, LAN | Production, remote | Team / personal mesh |

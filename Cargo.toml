@@ -76,6 +76,12 @@ chrono = { version = "0.4", features = ["serde"] }
 # URL encoding for pairing URLs
 urlencoding = "2.1"
 
+# Stable agent identity (UUID v4)
+uuid = { version = "1", features = ["v4"] }
+
+# TOML configuration
+toml = "0.8"
+
 [dev-dependencies]
 mockito = "1.2"
 tempfile = "3.10"

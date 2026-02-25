@@ -17,6 +17,9 @@ pub enum PairingError {
 /// Result type for pairing response
 #[derive(serde::Serialize)]
 pub struct PairingResponse {
+    /// Stable agent identity shared across all transports.
+    #[serde(rename = "agentId")]
+    pub agent_id: String,
     pub url: String,
     pub protocol: String,
     pub version: String,
@@ -55,6 +58,8 @@ impl PairingErrorResponse {
 
 /// Manages one-time pairing codes for secure client registration
 pub struct PairingManager {
+    /// Stable agent identity included in every pairing response.
+    pub agent_id: String,
     /// Current 6-digit pairing code
     code: String,
     /// When the code was created (for expiration)
@@ -78,8 +83,12 @@ pub struct PairingManager {
 }
 
 impl PairingManager {
-    /// Create a new PairingManager including Cloudflare service token credentials
+    /// Create a new PairingManager including Cloudflare service token credentials.
+    ///
+    /// `agent_id` is a stable UUID that will be included in the pairing response
+    /// so mobile clients can deduplicate connections across transports.
     pub fn new_with_cf(
+        agent_id: String,
         websocket_url: String,
         auth_token: String,
         cert_fingerprint: Option<String>,
@@ -88,6 +97,7 @@ impl PairingManager {
     ) -> Self {
         let code = generate_pairing_code();
         Self {
+            agent_id,
             code,
             created_at: Instant::now(),
             used: AtomicBool::new(false),
@@ -190,6 +200,7 @@ impl PairingManager {
         }
 
         Ok(PairingResponse {
+            agent_id: self.agent_id.clone(),
             url: self.websocket_url.clone(),
             protocol: "acp".to_string(),
             version: "1.0".to_string(),
@@ -228,6 +239,7 @@ mod tests {
     #[test]
     fn test_pairing_manager_valid_code() {
         let manager = PairingManager::new_with_cf(
+            "test-agent-id".to_string(),
             "wss://192.168.1.100:8080".to_string(),
             "test-token".to_string(),
             Some("SHA256:ABC123".to_string()),
@@ -247,6 +259,7 @@ mod tests {
     #[test]
     fn test_pairing_manager_invalid_code() {
         let manager = PairingManager::new_with_cf(
+            "test-agent-id".to_string(),
             "wss://192.168.1.100:8080".to_string(),
             "test-token".to_string(),
             None,
@@ -261,6 +274,7 @@ mod tests {
     #[test]
     fn test_pairing_manager_one_time_use() {
         let manager = PairingManager::new_with_cf(
+            "test-agent-id".to_string(),
             "wss://192.168.1.100:8080".to_string(),
             "test-token".to_string(),
             None,
@@ -281,6 +295,7 @@ mod tests {
     #[test]
     fn test_pairing_manager_rate_limiting() {
         let manager = PairingManager::new_with_cf(
+            "test-agent-id".to_string(),
             "wss://192.168.1.100:8080".to_string(),
             "test-token".to_string(),
             None,
@@ -301,6 +316,7 @@ mod tests {
     #[test]
     fn test_pairing_url_generation() {
         let manager = PairingManager::new_with_cf(
+            "test-agent-id".to_string(),
             "wss://192.168.1.100:8080".to_string(),
             "test-token".to_string(),
             Some("SHA256:ABC123".to_string()),
@@ -317,6 +333,7 @@ mod tests {
     fn test_tailscale_serve_pairing_url() {
         // serve mode: no fingerprint, /pair/tailscale path
         let manager = PairingManager::new_with_cf(
+            "test-agent-id".to_string(),
             "wss://my-laptop.tail1234.ts.net".to_string(),
             "test-token".to_string(),
             None,
@@ -333,6 +350,7 @@ mod tests {
     fn test_tailscale_ip_pairing_url() {
         // ip mode: fingerprint present, /pair/tailscale path
         let manager = PairingManager::new_with_cf(
+            "test-agent-id".to_string(),
             "wss://100.64.0.1:8080".to_string(),
             "test-token".to_string(),
             Some("SHA256:AB:CD:EF".to_string()),

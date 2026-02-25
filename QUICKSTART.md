@@ -2,20 +2,7 @@
 
 ## Prerequisites
 
-### 1. Cloudflare Setup
-- **Domain**: Must be using Cloudflare nameservers
-- **Zero Trust**: Enable at dash.cloudflare.com (requires payment method, free tier OK)
-- **API Token**: Create with these permissions:
-  - Cloudflare One → Connectors → Edit
-  - Access → Apps and Policies → Edit  
-  - Access → Service Tokens → Edit
-  - DNS → Zone → Edit
-
-### 2. Get Your Account ID
-- Found in Cloudflare Dashboard URL
-- Or in the right sidebar of your domain overview
-
-## Installation
+### Build from Source
 
 ```bash
 # Install Rust (if not already installed)
@@ -28,202 +15,228 @@ cargo build --release
 # Binary location: target/release/bridge
 ```
 
-## Usage
+---
 
-### First Time Setup
+## Local Transport (Default)
 
-```bash
-export CLOUDFLARE_API_TOKEN="your_api_token_here"
-export CLOUDFLARE_ACCOUNT_ID="your_account_id_here"
-
-./target/release/bridge setup \
-  --domain "yourdomain.com" \
-  --subdomain "agent"
-```
-
-**Output**: QR code + config saved to `~/.config/bridge/config.json`
-
-### Start the Bridge
+No configuration needed. On first run, `common.toml` is created automatically with local transport enabled.
 
 ```bash
-# For Gemini CLI
-./target/release/bridge start \
+bridge start \
   --agent-command "gemini --experimental-acp" \
   --qr
-
-# For Goose
-./target/release/bridge start \
-  --agent-command "goose" \
-  --qr
 ```
 
-### Show QR Code Again
+Scan the QR code with the Aptove app.
+
+---
+
+## Cloudflare Transport
+
+### 1. One-time setup
 
 ```bash
-./target/release/bridge show-qr
+bridge setup \
+  --api-token  "your_cloudflare_api_token" \
+  --account-id "your_account_id" \
+  --domain     "example.com" \
+  --subdomain  "agent"
 ```
 
-### Check Status
+This provisions your Cloudflare tunnel, DNS record, and service token, and writes the credentials into `common.toml` under `[transports.cloudflare]`. You only run this once.
+
+**Required API token permissions:**
+- Zone → DNS → Edit
+- Account → Cloudflare Tunnel → Edit
+- Account → Access: Apps and Policies → Edit
+- Account → Access: Service Tokens → Edit
+
+**Your Cloudflare Account ID** can be found in the Cloudflare Dashboard URL or the right sidebar of your domain overview.
+
+### 2. Enable Cloudflare in `common.toml`
+
+After setup, verify `[transports.cloudflare]` has `enabled = true`:
+
+```toml
+[transports.cloudflare]
+enabled       = true
+hostname      = "https://agent.example.com"
+tunnel_id     = "abc123"
+tunnel_secret = "..."
+account_id    = "..."
+client_id     = "client.access"
+client_secret = "xxxxx"
+```
+
+### 3. Start
 
 ```bash
-./target/release/bridge status
+bridge start --agent-command "gemini --experimental-acp" --qr
 ```
 
-## Mobile App Integration
+---
 
-### 1. Scan QR Code
-The QR contains JSON:
+## Tailscale Transport
+
+See [docs/transport/tailscale.md](docs/transport/tailscale.md) for prerequisites. Enable either or both modes in `common.toml`:
+
+```toml
+[transports.tailscale-serve]   # HTTPS via MagicDNS (recommended)
+enabled = true
+
+[transports.tailscale-ip]      # Direct Tailscale IP with self-signed TLS
+enabled = true
+port    = 8765
+tls     = true
+```
+
+Then start normally:
+
+```bash
+bridge start --agent-command "gemini --experimental-acp" --qr
+```
+
+---
+
+## Running Multiple Transports Simultaneously
+
+Enable multiple transport sections in `common.toml` — the bridge starts a listener for each:
+
+```toml
+[transports.local]
+enabled = true
+port    = 8765
+
+[transports.cloudflare]
+enabled = true
+# ... cloudflare fields ...
+
+[transports.tailscale-serve]
+enabled = true
+```
+
+```bash
+bridge start --agent-command "gemini --experimental-acp" --qr
+```
+
+All enabled transports start concurrently. The mobile app tries them in priority order (tailscale-serve → tailscale-ip → cloudflare → local) and connects via the first that succeeds.
+
+---
+
+## Useful Commands
+
+### Show QR Code
+
+```bash
+bridge show-qr
+```
+
+- If the bridge is **running**: shows a static QR with the current connection credentials.
+- If the bridge is **not running**: starts an offline registration server so you can pre-register a device before starting the bridge.
+
+### Check Configuration Status
+
+```bash
+bridge status
+```
+
+Prints `agent_id`, `common.toml` path, enabled transports, and Tailscale availability.
+
+---
+
+## QR Code Payload
+
+The QR encodes a pairing URL. The mobile app calls that URL to exchange the one-time code for credentials:
+
+**Pairing URL:**
+```
+https://<IP>:<PORT>/pair/local?code=847291&fp=SHA256%3A...
+```
+
+**Pairing response (returned by the bridge):**
 ```json
 {
-  "url": "https://agent.yourdomain.com",
-  "clientId": "xxxxx.access",
-  "clientSecret": "xxxxxxxxxxxxxx",
-  "protocol": "acp",
-  "version": "1.0"
+  "agentId":        "550e8400-e29b-41d4-a716-446655440000",
+  "url":            "wss://192.168.1.100:8765",
+  "protocol":       "acp",
+  "version":        "1.0",
+  "authToken":      "base64urltoken",
+  "certFingerprint":"SHA256:ABCD1234..."
 }
 ```
 
-### 2. Store in Keychain
-Never store in plain text or UserDefaults!
+`agentId` is a stable UUID that lets the mobile app recognise the same agent across multiple transports — scanning a second transport's QR adds a new endpoint instead of creating a duplicate agent.
 
-### 3. Connect with Headers
-```swift
-var request = URLRequest(url: URL(string: "wss://agent.yourdomain.com")!)
-request.addValue(clientID, forHTTPHeaderField: "CF-Access-Client-Id")
-request.addValue(clientSecret, forHTTPHeaderField: "CF-Access-Client-Secret")
+---
 
-let ws = URLSession.shared.webSocketTask(with: request)
-ws.resume()
+## Configuration File (`common.toml`)
+
+All settings live in one file:
+
+| Platform | Default Path |
+|----------|-------------|
+| macOS    | `~/Library/Application Support/com.aptove.bridge/common.toml` |
+| Linux    | `~/.config/bridge/common.toml` |
+
+Override with `--config-dir`:
+
+```bash
+bridge --config-dir ./my-config start --agent-command "gemini --experimental-acp"
 ```
 
-### 4. Send ACP Initialize
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "initialize",
-  "params": {
-    "capabilities": {},
-    "clientInfo": {
-      "name": "iOS Client",
-      "version": "1.0.0"
-    }
-  }
-}
+### Rotating Credentials
+
+To generate a new `agent_id`, `auth_token`, and TLS certificate (invalidates all paired devices):
+
+```bash
+rm ~/Library/Application\ Support/com.aptove.bridge/common.toml   # macOS
+rm ~/.config/bridge/common.toml                                    # Linux
+bridge start --agent-command "..." --qr
 ```
+
+---
 
 ## Common Issues
 
-### "Zone not found"
-- Check domain uses Cloudflare nameservers: `dig NS yourdomain.com`
-
-### "Failed to create tunnel"
-- Verify Zero Trust is enabled
-- Check API token permissions
-- Ensure payment method is added (even for free tier)
-
-### "403 Forbidden" from mobile
-- Verify headers are included: `CF-Access-Client-Id` and `CF-Access-Client-Secret`
-- Check token hasn't been revoked in dashboard
-
 ### Agent fails to start
-- Test command manually: `gemini --experimental-acp`
-- Check agent is installed and in PATH
+- Test the command manually: `gemini --experimental-acp`
+- Ensure the agent binary is installed and on your `PATH`
 
-## File Locations
+### QR code not scanning
+- Increase terminal font size or zoom in
+- Copy the pairing URL shown below the QR and open it manually with the app
 
-- **Config**: `~/.config/bridge/config.json`
-- **Binary**: `target/release/bridge`
-- **Logs**: stdout (use `tee` to save)
+### "Zone not found" (Cloudflare setup)
+- Check that the domain uses Cloudflare nameservers: `dig NS yourdomain.com`
 
-## Security Notes
+### "Failed to create tunnel" (Cloudflare setup)
+- Verify Zero Trust is enabled in the Cloudflare dashboard
+- Check API token permissions (see Cloudflare Transport section above)
+- Ensure a payment method is added (even for the free tier)
 
-1. **Protect config.json**: Contains Service Token secret
-   ```bash
-   chmod 600 ~/.config/bridge/config.json
-   ```
+### "403 Forbidden" from mobile (Cloudflare)
+- Ensure `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers are being sent
+- Check the service token hasn't been revoked in the Cloudflare dashboard
 
-2. **QR codes**: Treat as sensitive - they contain credentials
+### Tailscale: "tailscale serve mode requires MagicDNS + HTTPS"
+- Enable HTTPS certificates in the Tailscale admin console: Settings → DNS → Enable HTTPS
 
-3. **Token rotation**: Re-run `setup` to generate new tokens
-
-4. **Revoke tokens**: Cloudflare Dashboard → Zero Trust → Settings → Service Authentication
-
-## Architecture Flow
-
-```
-iPhone App (Swift)
-    ↓ WebSocket (wss://)
-    ↓ + CF-Access headers
-Cloudflare Zero Trust
-    ↓ Validates Service Token
-    ↓ Routes to tunnel
-Cloudflare Tunnel (cloudflared)
-    ↓ Local connection
-Bridge (Rust - port 8080)
-    ↓ stdio pipe
-ACP Agent (Gemini/Goose)
-```
-
-## Free Tier Limits
-
-| Feature | Limit | Impact |
-|---------|-------|--------|
-| Users | 50 | Plenty for personal use |
-| Tunnels | ∞ | No limit |
-| Subdomain levels | 1 | Use `agent.domain.com` not `x.agent.domain.com` |
-| Logs | 24h | Enough for debugging |
-| SSL | Universal | Single-level subdomains covered |
+---
 
 ## Commands Summary
 
 | Command | Purpose |
 |---------|---------|
-| `setup` | Create Cloudflare infrastructure |
-| `start` | Run the bridge server |
-| `show-qr` | Display connection QR |
-| `status` | Check configuration |
+| `bridge start --agent-command <CMD>` | Run the bridge (reads transport config from `common.toml`) |
+| `bridge show-qr` | Show QR / start offline registration |
+| `bridge status` | Show configuration and transport status |
+| `bridge setup ...` | Provision Cloudflare infrastructure (one-time) |
 
-## Environment Variables
+## Start Flags
 
-| Variable | Purpose | Required |
-|----------|---------|----------|
-| `CLOUDFLARE_API_TOKEN` | API authentication | For `setup` |
-| `CLOUDFLARE_ACCOUNT_ID` | Account identifier | For `setup` |
-
-## Example: Complete Flow
-
-```bash
-# 1. Setup (once)
-export CLOUDFLARE_API_TOKEN="..."
-export CLOUDFLARE_ACCOUNT_ID="..."
-cargo run --release -- setup --domain "example.com"
-
-# 2. Save the QR code (scan with mobile)
-
-# 3. Start bridge
-cargo run --release -- start --agent-command "gemini --experimental-acp"
-
-# 4. Mobile app connects and sends initialize
-
-# 5. Start chatting with your agent!
-```
-
-## Next Steps
-
-1. Build: `cargo build --release`
-2. Setup: Run `setup` command
-3. Scan: Use mobile app to scan QR
-4. Start: Run `start` command
-5. Connect: Mobile app connects via WebSocket
-6. Chat: Send ACP messages to your agent
-
-## Support
-
-- **Issues**: Check IMPLEMENTATION.md for details
-- **Examples**: See `examples/` directory
-- **Swift Client**: See `examples/swift-client.swift`
-
----
-
-**Remember**: This entire setup works on Cloudflare's FREE tier! 🎉
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--agent-command <CMD>` | Command to spawn the ACP agent | Required |
+| `--bind <ADDR>` | Bind address for all listeners | `0.0.0.0` |
+| `--qr` | Display QR code(s) at startup | Off |
+| `--verbose` | Info-level logging | Off |
