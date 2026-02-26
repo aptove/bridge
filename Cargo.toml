@@ -1,6 +1,6 @@
 [package]
-name = "bridge"
-version = "0.1.1"
+name = "aptove-bridge"
+version = "0.1.2"
 edition = "2021"
 authors = ["Saltuk Alakus <saltukalakus@gmail.com>"]
 description = "A secure bridge between stdio-based ACP agents and mobile apps via Cloudflare Zero Trust"
