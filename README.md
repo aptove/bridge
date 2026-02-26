@@ -229,10 +229,10 @@ Prints the active `common.toml` path, `agent_id`, enabled transports, and Tailsc
 ### Standalone
 
 ```
-┌─────────────┐                    ┌──────────────────────┐        ┌──────────────┐
+┌─────────────┐                    ┌───────────────────────┐        ┌──────────────┐
 │  Client App │◄──────────────────►│  bridge binary        │◄──────►│  ACP Agent   │
 │ (iOS/Android│  WebSocket (TLS)   │  (transport listener) │  stdio │  (your cmd)  │
-└─────────────┘                    └──────────────────────┘        └──────────────┘
+└─────────────┘                    └───────────────────────┘        └──────────────┘
 ```
 
 ### Embedded (library)
@@ -242,7 +242,7 @@ Prints the active `common.toml` path, `agent_id`, enabled transports, and Tailsc
 │  Client App │◄──────────────────►│  Your process                                │
 │ (iOS/Android│  WebSocket (TLS)   │  ┌─────────────────┐  ┌────────────────────┐ │
 └─────────────┘                    │  │  BridgeServer   │◄►│  Agent message loop│ │
-                                   │  │  (transport)    │  │  (InProcessTransport│ │
+                                   │  │  (transport)    │  │ (InProcessTransport│ │
                                    │  └─────────────────┘  └────────────────────┘ │
                                    └──────────────────────────────────────────────┘
 ```
