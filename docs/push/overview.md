@@ -145,7 +145,7 @@ Push Relay Storage (KV):
 
 ## QR Code Contents
 
-When the bridge starts with `--qr`, it displays a QR code containing a JSON payload:
+When the bridge runs with `--qr`, it displays a QR code containing a JSON payload:
 
 ### QR Code Data Structure
 
@@ -205,7 +205,7 @@ The mobile app uses:
 ### Starting with Push Notifications
 
 ```bash
-bridge start \
+bridge run \
   --agent-command "copilot --acp" \
   --port 3001 \
   --stdio-proxy \
@@ -406,7 +406,7 @@ Content-Type: application/json
 ```bash
 cd bridge
 cargo build --release
-./target/release/bridge start \
+./target/release/bridge run \
   --agent-command "copilot --acp" \
   --port 3001 \
   --stdio-proxy \
@@ -497,7 +497,7 @@ cf-push-relay/src/
 
 ```bash
 # Enable verbose logging
-bridge start --verbose ...
+bridge run --verbose ...
 
 # Sample log output:
 INFO  📱 Registering ios device token with push relay
@@ -559,7 +559,7 @@ npx wrangler tail
 
 ### Registration fails
 
-1. Check relay URL is correct in bridge startup
+1. Check relay URL is correct in bridge runup
 2. Verify network connectivity
 3. Check relay logs for errors:
    ```bash

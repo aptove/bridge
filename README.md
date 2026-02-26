@@ -11,7 +11,7 @@ A bridge between stdio-based Agent Client Protocol (ACP) agents and mobile appli
 | **Tailscale Serve** | Private overlay network via MagicDNS + HTTPS | [docs/transport/tailscale.md](docs/transport/tailscale.md) |
 | **Tailscale IP** | Direct Tailscale IP with self-signed TLS | [docs/transport/tailscale.md](docs/transport/tailscale.md) |
 
-Multiple transports can run simultaneously — the bridge starts one listener per enabled transport.
+Multiple transports can run simultaneously — the bridge runs one listener per enabled transport.
 
 ## Features
 
@@ -29,7 +29,7 @@ Multiple transports can run simultaneously — the bridge starts one listener pe
 cargo build --release
 
 # Start with local transport (default — no config needed)
-./target/release/bridge start \
+./target/release/bridge run \
   --agent-command "gemini --experimental-acp" \
   --qr
 ```
@@ -40,9 +40,14 @@ Scan the QR code with the Aptove mobile app to connect.
 
 All transport settings live in `common.toml`. The file is created automatically with local transport enabled on first run.
 
-**Default location:**
-- macOS: `~/Library/Application Support/com.aptove.bridge/common.toml`
-- Linux: `~/.config/bridge/common.toml`
+**Default location** (depends on how you run the bridge):
+
+| Runtime | macOS | Linux |
+|---------|-------|-------|
+| `aptove run` (embedded) | `~/Library/Application Support/Aptove/common.toml` | `~/.config/Aptove/common.toml` |
+| `bridge` (standalone) | `~/Library/Application Support/com.aptove.bridge/common.toml` | `~/.config/bridge/common.toml` |
+
+When using `aptove run`, this config is shared across all workspaces.
 
 Override with `--config-dir`:
 ```bash
@@ -85,7 +90,7 @@ Enable only the transports you need. `agent_id` and `auth_token` are generated a
 ### `start` — Run the bridge
 
 ```bash
-bridge start --agent-command "<your-agent-command>"
+bridge run --agent-command "<your-agent-command>"
 ```
 
 | Flag | Description | Default |
@@ -97,14 +102,19 @@ bridge start --agent-command "<your-agent-command>"
 
 Transport selection, ports, TLS, and auth tokens are all read from `common.toml`.
 
-### `show-qr` — Show QR code
+### `show-qr` — Show QR code for a second device
 
 ```bash
 bridge show-qr
 ```
 
-- **Bridge running**: displays a static QR with connection credentials for the active local transport.
-- **Bridge not running**: starts an offline registration server — shows pairing QR, waits for a mobile device to complete pairing, then exits. Useful for pre-registering a device before starting the bridge.
+Displays the connection QR code for the currently active transport. The bridge must already be running. Use this to pair an additional device without restarting the bridge.
+
+To show the QR at initial startup, pass `--qr` to `bridge run` instead:
+
+```bash
+bridge run --agent-command "aptove stdio" --qr
+```
 
 ### `setup` — Provision Cloudflare infrastructure
 
@@ -161,7 +171,7 @@ Multiple transport listeners share the same agent process.
 
 ```bash
 # Enable verbose logging
-bridge start --agent-command "gemini --experimental-acp" --verbose
+bridge run --agent-command "gemini --experimental-acp" --verbose
 
 # Check which transports are configured
 bridge status
@@ -180,10 +190,15 @@ echo '{"jsonrpc":"2.0","method":"initialize","id":1}' | gemini --experimental-ac
 To rotate credentials (invalidates all paired devices):
 
 ```bash
-# Delete config and restart — new agent_id, auth_token, and TLS cert are generated
+# Using aptove run (embedded bridge):
+rm ~/Library/Application\ Support/Aptove/common.toml   # macOS
+rm ~/.config/Aptove/common.toml                        # Linux
+aptove run --qr
+
+# Using standalone bridge binary:
 rm ~/Library/Application\ Support/com.aptove.bridge/common.toml   # macOS
 rm ~/.config/bridge/common.toml                                    # Linux
-bridge start --agent-command "..." --qr
+bridge run --agent-command "aptove stdio" --qr
 ```
 
 ## Development

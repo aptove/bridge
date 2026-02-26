@@ -228,7 +228,7 @@ bridge setup \
 5. **Build the CLI**: `cargo build --release`
 6. **Run Setup**: `bridge setup ...`
 7. **Scan QR**: From your mobile app
-8. **Start Bridge**: `bridge start ...`
+8. **Start Bridge**: `bridge run ...`
 9. **Connect**: Mobile → Cloudflare → Bridge → Agent
 
 **Total cost**: Domain only (~$10/year). Everything else is free! 🎉

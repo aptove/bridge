@@ -99,6 +99,10 @@ pub struct StdioBridge {
     webhook_resolver: Option<WebhookResolverFn>,
     /// Per-trigger sliding-window rate limiter.
     webhook_rate_limiter: Arc<Mutex<TriggerRateLimiter>>,
+    /// When `true`, TLS is handled by an external proxy (e.g. Tailscale serve
+    /// or Cloudflare). Suppresses the "TLS disabled" warning since the
+    /// public-facing connection is still encrypted end-to-end.
+    external_tls: bool,
 }
 
 impl StdioBridge {
@@ -115,7 +119,16 @@ impl StdioBridge {
             push_relay: None,
             webhook_resolver: None,
             webhook_rate_limiter: Arc::new(Mutex::new(TriggerRateLimiter::new())),
+            external_tls: false,
         }
+    }
+
+    /// Mark this bridge as sitting behind an external TLS proxy (e.g. Tailscale
+    /// serve, Cloudflare tunnel). Suppresses the spurious "TLS disabled" warning
+    /// since the public connection is already encrypted end-to-end.
+    pub fn with_external_tls(mut self) -> Self {
+        self.external_tls = true;
+        self
     }
 
     /// Use an in-process agent handle instead of spawning a subprocess.
@@ -192,6 +205,8 @@ impl StdioBridge {
         
         if self.tls_config.is_some() {
             info!("🔒 TLS enabled");
+        } else if self.external_tls {
+            info!("🔒 TLS handled by external proxy (Tailscale / Cloudflare)");
         } else {
             warn!("⚠️  TLS disabled - connections are not encrypted!");
         }
@@ -1363,7 +1378,12 @@ where
             let line = String::from_utf8_lossy(&bytes).trim_end_matches('\n').to_string();
             debug!("📤 agent→WS ({} bytes)", line.len());
             if let Err(e) = ws_sender.send(Message::Text(line)).await {
-                error!("Failed to send to WebSocket: {}", e);
+                let msg = e.to_string();
+                if msg.contains("Sending after closing") || msg.contains("connection closed") {
+                    debug!("WebSocket closed before message could be sent (client disconnected)");
+                } else {
+                    error!("Failed to send to WebSocket: {}", e);
+                }
                 break;
             }
         }
@@ -1477,7 +1497,12 @@ where
                 line.chars().take(200).collect::<String>());
 
             if let Err(e) = ws_sender.send(Message::Text(line)).await {
-                error!("Failed to send to WebSocket: {}", e);
+                let msg = e.to_string();
+                if msg.contains("Sending after closing") || msg.contains("connection closed") {
+                    debug!("WebSocket closed before message could be sent (client disconnected)");
+                } else {
+                    error!("Failed to send to WebSocket: {}", e);
+                }
                 break;
             }
             info!("✅ Message sent to WebSocket successfully");

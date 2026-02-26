@@ -63,7 +63,7 @@ port    = 8765
 ## Starting the Bridge
 
 ```bash
-bridge start --agent-command "gemini --experimental-acp" --qr
+bridge run --agent-command "gemini --experimental-acp" --qr
 ```
 
 That's all. Transport mode is read from `common.toml` — no extra flags needed.
@@ -127,7 +127,7 @@ and receives credentials:
 
 - The mobile device must be connected to the same tailnet before pairing. Verify with the Tailscale app that the device can reach the bridge host.
 - After pairing, the app reconnects automatically as long as the device remains on the tailnet.
-- If `tailscale-ip` mode is used and the Tailscale IP changes (e.g. you join a different tailnet), the TLS certificate is regenerated on the next bridge start and the mobile app must re-pair.
+- If `tailscale-ip` mode is used and the Tailscale IP changes (e.g. you join a different tailnet), the TLS certificate is regenerated on the next bridge run and the mobile app must re-pair.
 
 ---
 

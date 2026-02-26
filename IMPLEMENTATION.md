@@ -78,7 +78,7 @@ This command:
 ### Runtime Flow
 
 ```bash
-bridge start --agent-command "gemini --experimental-acp"
+bridge run --agent-command "gemini --experimental-acp"
 ```
 
 This command:
@@ -178,7 +178,7 @@ Works perfectly on Cloudflare's free Zero Trust tier:
 
 5. **Start bridge**:
    ```bash
-   ./target/release/bridge start \
+   ./target/release/bridge run \
      --agent-command "gemini --experimental-acp"
    ```
 

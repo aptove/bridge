@@ -90,7 +90,7 @@ client_secret = "xxxxx"
 ## Starting the Bridge
 
 ```bash
-bridge start --agent-command "gemini --experimental-acp" --qr
+bridge run --agent-command "gemini --experimental-acp" --qr
 ```
 
 Transport selection is read from `common.toml` — no `--cloudflare` flag is needed. The bridge:
@@ -189,7 +189,7 @@ bridge setup --api-token "..." --account-id "..." --domain "example.com"
 | `cloudflared not found on PATH` | `cloudflared` not installed | Install per Prerequisites above |
 | `cloudflared did not become ready within 30 seconds` | Tunnel misconfigured or network issue | Check `~/.cloudflared/config.yml`; run `cloudflared tunnel run --loglevel debug` manually |
 | `Authentication error (code 10000)` during setup | API token missing `Access: Service Tokens: Edit` permission | Edit the token in Cloudflare dashboard and add that permission |
-| App gets "bad response from server" | Bridge not running or Service Token expired | Ensure `bridge start` is running; re-scan QR if token was rotated |
+| App gets "bad response from server" | Bridge not running or Service Token expired | Ensure `bridge run` is running; re-scan QR if token was rotated |
 | App connects but times out | Wrong port in ingress rule | Delete `common.toml` and re-run `bridge setup` |
 | "403 Forbidden" from mobile | Missing `CF-Access-Client-Id`/`CF-Access-Client-Secret` headers | Re-scan the QR code |
 

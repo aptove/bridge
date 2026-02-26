@@ -22,7 +22,7 @@ cargo build --release
 No configuration needed. On first run, `common.toml` is created automatically with local transport enabled.
 
 ```bash
-bridge start \
+bridge run \
   --agent-command "gemini --experimental-acp" \
   --qr
 ```
@@ -71,7 +71,7 @@ client_secret = "xxxxx"
 ### 3. Start
 
 ```bash
-bridge start --agent-command "gemini --experimental-acp" --qr
+bridge run --agent-command "gemini --experimental-acp" --qr
 ```
 
 ---
@@ -93,14 +93,14 @@ tls     = true
 Then start normally:
 
 ```bash
-bridge start --agent-command "gemini --experimental-acp" --qr
+bridge run --agent-command "gemini --experimental-acp" --qr
 ```
 
 ---
 
 ## Running Multiple Transports Simultaneously
 
-Enable multiple transport sections in `common.toml` — the bridge starts a listener for each:
+Enable multiple transport sections in `common.toml` — the bridge runs a listener for each:
 
 ```toml
 [transports.local]
@@ -116,7 +116,7 @@ enabled = true
 ```
 
 ```bash
-bridge start --agent-command "gemini --experimental-acp" --qr
+bridge run --agent-command "gemini --experimental-acp" --qr
 ```
 
 All enabled transports start concurrently. The mobile app tries them in priority order (tailscale-serve → tailscale-ip → cloudflare → local) and connects via the first that succeeds.
@@ -125,14 +125,19 @@ All enabled transports start concurrently. The mobile app tries them in priority
 
 ## Useful Commands
 
-### Show QR Code
+### Show QR Code (second device)
 
 ```bash
 bridge show-qr
 ```
 
-- If the bridge is **running**: shows a static QR with the current connection credentials.
-- If the bridge is **not running**: starts an offline registration server so you can pre-register a device before starting the bridge.
+Displays the connection QR for the currently active transport. **The bridge must already be running.** Use this to pair an additional device without restarting.
+
+To show the QR at initial startup, pass `--qr` to `bridge run`:
+
+```bash
+bridge run --agent-command "aptove stdio" --qr
+```
 
 ### Check Configuration Status
 
@@ -171,12 +176,16 @@ https://<IP>:<PORT>/pair/local?code=847291&fp=SHA256%3A...
 
 ## Configuration File (`common.toml`)
 
-All settings live in one file:
+All settings live in one file. The path depends on how you run the bridge:
 
-| Platform | Default Path |
-|----------|-------------|
-| macOS    | `~/Library/Application Support/com.aptove.bridge/common.toml` |
-| Linux    | `~/.config/bridge/common.toml` |
+| Runtime | Platform | Default Path |
+|---------|----------|-------------|
+| `aptove run` (embedded) | macOS | `~/Library/Application Support/Aptove/common.toml` |
+| `aptove run` (embedded) | Linux | `~/.config/Aptove/common.toml` |
+| `bridge` (standalone binary) | macOS | `~/Library/Application Support/com.aptove.bridge/common.toml` |
+| `bridge` (standalone binary) | Linux | `~/.config/bridge/common.toml` |
+
+When using `aptove run`, the config is shared across all workspaces.
 
 Override with `--config-dir`:
 
@@ -189,9 +198,15 @@ bridge --config-dir ./my-config start --agent-command "gemini --experimental-acp
 To generate a new `agent_id`, `auth_token`, and TLS certificate (invalidates all paired devices):
 
 ```bash
+# Using aptove run (embedded bridge):
+rm ~/Library/Application\ Support/Aptove/common.toml   # macOS
+rm ~/.config/Aptove/common.toml                        # Linux
+aptove run --qr
+
+# Using standalone bridge binary:
 rm ~/Library/Application\ Support/com.aptove.bridge/common.toml   # macOS
 rm ~/.config/bridge/common.toml                                    # Linux
-bridge start --agent-command "..." --qr
+bridge run --agent-command "aptove stdio" --qr
 ```
 
 ---
@@ -227,7 +242,7 @@ bridge start --agent-command "..." --qr
 
 | Command | Purpose |
 |---------|---------|
-| `bridge start --agent-command <CMD>` | Run the bridge (reads transport config from `common.toml`) |
+| `bridge run --agent-command <CMD>` | Run the bridge (reads transport config from `common.toml`) |
 | `bridge show-qr` | Show QR / start offline registration |
 | `bridge status` | Show configuration and transport status |
 | `bridge setup ...` | Provision Cloudflare infrastructure (one-time) |

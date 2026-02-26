@@ -40,7 +40,7 @@ tls     = true    # default: true
 ## Starting the Bridge
 
 ```bash
-bridge start --agent-command "gemini --experimental-acp" --qr
+bridge run --agent-command "gemini --experimental-acp" --qr
 ```
 
 The bridge reads port, TLS, and auth token settings from `common.toml` — no flags needed.
@@ -174,7 +174,7 @@ To regenerate `auth_token`, `agent_id`, and TLS cert (invalidates all paired dev
 ```bash
 rm ~/Library/Application\ Support/com.aptove.bridge/common.toml   # macOS
 rm ~/.config/bridge/common.toml                                    # Linux
-bridge start --agent-command "..." --qr
+bridge run --agent-command "..." --qr
 ```
 
 ---
@@ -196,7 +196,7 @@ curl -k "https://192.168.1.100:8765/pair/local?code=847291"
 - Run `bridge status` to confirm the port and IP
 
 ### "Invalid code"
-- Codes expire after 60 seconds — re-run `bridge start --qr` to get a fresh code
+- Codes expire after 60 seconds — re-run `bridge run --qr` to get a fresh code
 - Codes are single-use — scan only once
 - Check for typos if entering the code manually
 

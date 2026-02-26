@@ -3,23 +3,67 @@ use std::process::{Command, Stdio};
 use tracing::{debug, info};
 
 const INSTALL_HINT: &str = "\
-tailscale not found on PATH.\n\
+Tailscale is not installed.\n\
 Install it from: https://tailscale.com/download";
 
-/// Returns `true` if the `tailscale` binary is available on PATH.
-pub fn is_tailscale_available() -> bool {
-    Command::new("tailscale")
+const NOT_RUNNING_HINT: &str = "\
+Tailscale is installed but not running or not connected.\n\
+On macOS: open the Tailscale app from Applications or the menu bar.\n\
+On Linux: run 'sudo tailscaled' or 'sudo systemctl start tailscaled', then 'tailscale up'.";
+
+/// Distinguishes between Tailscale install states.
+enum TailscaleState {
+    /// Binary not found on PATH.
+    NotInstalled,
+    /// Binary found but the daemon is not running / CLI can't connect.
+    NotRunning,
+    /// Binary found and CLI is functional.
+    Available,
+}
+
+/// Probe the Tailscale CLI state without touching stderr/stdout in the caller.
+fn tailscale_state() -> TailscaleState {
+    let Ok(output) = Command::new("tailscale")
         .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok()
+        .output()
+    else {
+        return TailscaleState::NotInstalled;
+    };
+
+    // The macOS App Store edition exits 0 but prints an error string to stdout
+    // when the daemon isn't reachable. Treat any "failed to start" output as
+    // daemon-not-running rather than available.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{}{}", stdout, stderr).to_lowercase();
+    if combined.contains("failed to start") || combined.contains("couldn't be completed") {
+        return TailscaleState::NotRunning;
+    }
+
+    // If the binary couldn't be spawned at all it's not installed.
+    if !output.status.success() && stdout.trim().is_empty() {
+        return TailscaleState::NotInstalled;
+    }
+
+    TailscaleState::Available
+}
+
+/// Returns `true` if the `tailscale` binary is on PATH and the daemon is reachable.
+pub fn is_tailscale_available() -> bool {
+    matches!(tailscale_state(), TailscaleState::Available)
+}
+
+/// Returns `true` if the `tailscale` binary is on PATH (even if daemon is not running).
+pub fn is_tailscale_installed() -> bool {
+    !matches!(tailscale_state(), TailscaleState::NotInstalled)
 }
 
 /// Returns the machine's Tailscale IPv4 address (100.x.x.x range).
 pub fn get_tailscale_ipv4() -> Result<String> {
-    if !is_tailscale_available() {
-        anyhow::bail!("{}", INSTALL_HINT);
+    match tailscale_state() {
+        TailscaleState::NotInstalled => anyhow::bail!("{}", INSTALL_HINT),
+        TailscaleState::NotRunning => anyhow::bail!("{}", NOT_RUNNING_HINT),
+        TailscaleState::Available => {}
     }
     let output = Command::new("tailscale")
         .args(["ip", "--4"])
@@ -38,9 +82,12 @@ pub fn get_tailscale_ipv4() -> Result<String> {
 
 /// Returns the machine's MagicDNS hostname (e.g., `my-laptop.tail1234.ts.net`).
 /// Returns `None` if MagicDNS is not enabled or the hostname is empty.
+/// Errors if Tailscale is not installed or the daemon is not running.
 pub fn get_tailscale_hostname() -> Result<Option<String>> {
-    if !is_tailscale_available() {
-        anyhow::bail!("{}", INSTALL_HINT);
+    match tailscale_state() {
+        TailscaleState::NotInstalled => anyhow::bail!("{}", INSTALL_HINT),
+        TailscaleState::NotRunning => anyhow::bail!("{}", NOT_RUNNING_HINT),
+        TailscaleState::Available => {}
     }
     let output = Command::new("tailscale")
         .args(["status", "--json"])
@@ -49,8 +96,12 @@ pub fn get_tailscale_hostname() -> Result<Option<String>> {
     if !output.status.success() {
         return Ok(None);
     }
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .context("Failed to parse tailscale status JSON")?;
+    // Tailscale may exit 0 but output a non-JSON error string (e.g. when not
+    // yet connected). Treat parse failure as "no hostname available".
+    let json: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
     let dns_name = json
         .get("Self")
         .and_then(|s| s.get("DNSName"))
@@ -120,8 +171,10 @@ impl Drop for TailscaleServeGuard {
 /// Requires MagicDNS + HTTPS enabled on the tailnet.
 /// Returns a guard that runs `tailscale serve reset` when dropped.
 pub fn tailscale_serve_start(port: u16) -> Result<TailscaleServeGuard> {
-    if !is_tailscale_available() {
-        anyhow::bail!("{}", INSTALL_HINT);
+    match tailscale_state() {
+        TailscaleState::NotInstalled => anyhow::bail!("{}", INSTALL_HINT),
+        TailscaleState::NotRunning => anyhow::bail!("{}", NOT_RUNNING_HINT),
+        TailscaleState::Available => {}
     }
     check_tailscale_version()?;
     // Verify MagicDNS hostname is available

@@ -10,7 +10,7 @@ use bridge::config::{self as config, BridgeConfig};
 use bridge::pairing::PairingManager;
 use bridge::tls::TlsConfig;
 use bridge::qr as qr;
-use bridge::tailscale::{is_tailscale_available, get_tailscale_ipv4, get_tailscale_hostname, tailscale_serve_start, TailscaleServeGuard};
+use bridge::tailscale::{is_tailscale_available, is_tailscale_installed, get_tailscale_ipv4, get_tailscale_hostname, tailscale_serve_start, TailscaleServeGuard};
 
 #[derive(Parser)]
 #[command(name = "bridge")]
@@ -49,8 +49,8 @@ enum Commands {
         tunnel_name: String,
     },
 
-    /// Start the bridge server (reads transport config from common.toml)
-    Start {
+    /// Run the bridge server (reads transport config from common.toml)
+    Run {
         /// Command to run the ACP agent (e.g., "gemini --experimental-acp")
         #[arg(short, long)]
         agent_command: String,
@@ -59,7 +59,7 @@ enum Commands {
         #[arg(short, long, default_value = "0.0.0.0")]
         bind: String,
 
-        /// Show QR code for mobile connection at startup
+        /// Print connection QR code(s) at startup so you can scan with the Aptove mobile app
         #[arg(short = 'Q', long)]
         qr: bool,
 
@@ -68,7 +68,11 @@ enum Commands {
         verbose: bool,
     },
 
-    /// Show connection QR code (detects whether bridge is running)
+    /// Show connection QR code for a second device to connect to the running bridge
+    ///
+    /// Displays the QR code for the currently active transport. The bridge must
+    /// already be running (via `bridge run`). Use this when you need to pair an
+    /// additional device without restarting the bridge.
     ShowQr,
 
     /// Check configuration status
@@ -423,7 +427,7 @@ async fn main() -> Result<()> {
 
     // Determine log level based on command and flags
     let log_level = match &cli.command {
-        Commands::Start { verbose, .. } => {
+        Commands::Run { verbose, .. } => {
             if *verbose { "info" } else { "warn" }
         }
         _ => "info",
@@ -503,10 +507,10 @@ async fn main() -> Result<()> {
             let json = config.to_connection_json()?;
             qr::display_qr_code(&json, "cloudflare")?;
             println!("\n⚠️  Important: Keep your configuration file secure. It contains sensitive credentials.");
-            println!("\n🚀 Start the bridge with: bridge start --agent-command \"gemini --experimental-acp\"");
+            println!("\n🚀 Start the bridge with: bridge run --agent-command \"gemini --experimental-acp\"");
         }
 
-        Commands::Start { agent_command, bind, qr, verbose: _ } => {
+        Commands::Run { agent_command, bind, qr, verbose: _ } => {
             info!("🌉 Starting ACP Bridge...");
 
             // Load (or initialise) the common config
@@ -580,6 +584,8 @@ async fn main() -> Result<()> {
             info!("📡 Starting WebSocket server on {}:{} (transport: {})", effective_bind, port, transport_name);
             info!("🤖 Agent command: {}", agent_command);
 
+            let uses_external_tls = matches!(transport_name.as_str(), "tailscale-serve" | "cloudflare");
+
             let mut bridge = StdioBridge::new(agent_command.clone(), port)
                 .with_bind_addr(effective_bind)
                 .with_auth_token(Some(config.auth_token.clone()))
@@ -588,6 +594,8 @@ async fn main() -> Result<()> {
             if let Some(tls) = tls_config {
                 info!("🔒 TLS fingerprint: {}", tls.fingerprint_short());
                 bridge = bridge.with_tls(tls);
+            } else if uses_external_tls {
+                bridge = bridge.with_external_tls();
             }
 
             // _ts_guard and _cf_runner live until end of this block (bridge lifetime).
@@ -598,11 +606,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::ShowQr => {
-            let mut config = CommonConfig::load()?;
-            config.ensure_agent_id();
-            config.ensure_auth_token();
-            config.save()?;
-
+            let config = CommonConfig::load()?;
             let config_dir = CommonConfig::config_dir();
 
             match find_active_transport(&config) {
@@ -611,7 +615,9 @@ async fn main() -> Result<()> {
                 }
                 None => {
                     println!("Bridge is not running.");
-                    println!("Start it with: bridge start --agent-command \"<your-command>\" --qr");
+                    println!();
+                    println!("Start it first, then run 'bridge show-qr' to display the connection QR:");
+                    println!("  bridge run --agent-command \"<your-command>\"");
                 }
             }
         }
@@ -680,8 +686,10 @@ async fn main() -> Result<()> {
                     }
                     Err(_) => println!("Tailscale: not enrolled (run 'tailscale up')"),
                 }
+            } else if is_tailscale_installed() {
+                println!("Tailscale: installed but not running (open the Tailscale app to connect)");
             } else {
-                println!("Tailscale: not installed");
+                println!("Tailscale: not installed (https://tailscale.com/download)");
             }
         }
     }
