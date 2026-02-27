@@ -1,5 +1,8 @@
 # aptove-bridge
 
+[![crates.io](https://img.shields.io/crates/v/aptove-bridge.svg)](https://crates.io/crates/aptove-bridge)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/gD7AMxBy9y)
+
 A bridge library and application between Agent Client Protocol (ACP) agents and clients.
 
 `aptove-bridge` can be used in two ways:
