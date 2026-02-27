@@ -1,0 +1,73 @@
+#!/usr/bin/env node
+
+/**
+ * bridge - ACP bridge
+ *
+ * This script finds and executes the platform-specific binary.
+ */
+
+const { execFileSync } = require('child_process');
+const path = require('path');
+const fs = require('fs');
+
+const PLATFORM_PACKAGES = {
+  'darwin-arm64': '@aptove/bridge-darwin-arm64',
+  'darwin-x64':   '@aptove/bridge-darwin-x64',
+  'linux-arm64':  '@aptove/bridge-linux-arm64',
+  'linux-x64':    '@aptove/bridge-linux-x64',
+  'win32-x64':    '@aptove/bridge-win32-x64',
+};
+
+function getBinaryPath() {
+  const platformKey = `${process.platform}-${process.arch}`;
+  const packageName = PLATFORM_PACKAGES[platformKey];
+
+  if (!packageName) {
+    console.error(`Unsupported platform: ${platformKey}`);
+    console.error('Supported platforms: darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-x64');
+    process.exit(1);
+  }
+
+  const binaryName = process.platform === 'win32' ? 'bridge.exe' : 'bridge';
+
+  const possiblePaths = [
+    path.join(__dirname, '..', packageName, 'bin', binaryName),
+    path.join(__dirname, '..', '..', packageName, 'bin', binaryName),
+    path.join(__dirname, '..', 'node_modules', packageName, 'bin', binaryName),
+  ];
+
+  for (const binaryPath of possiblePaths) {
+    if (fs.existsSync(binaryPath)) {
+      return binaryPath;
+    }
+  }
+
+  try {
+    const packagePath = require.resolve(`${packageName}/package.json`);
+    const binaryPath = path.join(path.dirname(packagePath), 'bin', binaryName);
+    if (fs.existsSync(binaryPath)) {
+      return binaryPath;
+    }
+  } catch (e) {
+    // Package not found
+  }
+
+  console.error(`Could not find bridge binary for ${platformKey}`);
+  console.error(`Please ensure ${packageName} is installed.`);
+  console.error('');
+  console.error('Try reinstalling with:');
+  console.error('  npm install -g @aptove/bridge');
+  process.exit(1);
+}
+
+const binaryPath = getBinaryPath();
+const args = process.argv.slice(2);
+
+try {
+  execFileSync(binaryPath, args, { stdio: 'inherit' });
+} catch (error) {
+  if (error.status !== undefined) {
+    process.exit(error.status);
+  }
+  throw error;
+}
