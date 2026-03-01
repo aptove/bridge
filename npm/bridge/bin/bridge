@@ -54,4 +54,11 @@ if (!binaryPath) {
 }
 
 const result = spawnSync(binaryPath, process.argv.slice(2), { stdio: 'inherit' });
+
+if (result.error) {
+  console.error(`bridge: failed to execute binary: ${result.error.message}`);
+  console.error(`  Binary: ${binaryPath}`);
+  process.exit(1);
+}
+
 process.exit(result.status ?? 1);
