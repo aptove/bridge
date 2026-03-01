@@ -361,6 +361,12 @@ jobs:
           path: npm/
           merge-multiple: false
 
+      - name: Restore executable permissions on binaries
+        run: |
+          for f in npm/bridge-*/bin/bridge; do
+            [ -f "$f" ] && chmod +x "$f"
+          done
+
       - name: Get version
         id: version
         run: |

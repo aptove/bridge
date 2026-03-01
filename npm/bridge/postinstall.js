@@ -23,6 +23,16 @@ function isBinaryPresent(binaryPath) {
   return fs.existsSync(binaryPath);
 }
 
+// Ensures the binary has executable permissions (no-op on Windows).
+function ensureExecutable(binaryPath) {
+  if (process.platform === 'win32') return;
+  try {
+    fs.chmodSync(binaryPath, 0o755);
+  } catch (e) {
+    // best-effort
+  }
+}
+
 // Returns the version string from `bridge --version` (e.g. "0.1.12"), or null on failure.
 function getBinaryVersion(binaryPath) {
   const result = spawnSync(binaryPath, ['--version'], { stdio: 'pipe' });
@@ -94,6 +104,8 @@ function main({
     try {
       log(`  Installing ${packageName}@${version}...`);
       fn(packageName, version);
+      // GitHub artifact uploads strip execute permissions; restore them.
+      if (isBinaryPresent(siblingBinaryPath)) ensureExecutable(siblingBinaryPath);
       return true;
     } catch (e) {
       return false;
@@ -103,6 +115,9 @@ function main({
   const expectedVersion = getExpectedVersion(packageJsonPath);
 
   if (isBinaryPresent(siblingBinaryPath)) {
+    // Fix permissions in case the binary was published without the execute bit
+    // (GitHub Actions artifacts do not preserve file permissions).
+    ensureExecutable(siblingBinaryPath);
     const installedVersion = getBinaryVersion(siblingBinaryPath);
     if (installedVersion && expectedVersion && installedVersion !== expectedVersion) {
       log(`⬆  bridge: updating platform binary ${installedVersion} → ${expectedVersion}...`);
@@ -127,6 +142,7 @@ function main({
   // (require.resolve cannot be used here — Node.js caches negative module
   // resolution results within the same process.)
   if (isBinaryPresent(siblingBinaryPath)) {
+    ensureExecutable(siblingBinaryPath);
     const installedVersion = getBinaryVersion(siblingBinaryPath);
     if (installedVersion) {
       if (expectedVersion && installedVersion !== expectedVersion) {
@@ -145,7 +161,7 @@ function main({
   exitFn(0);
 }
 
-module.exports = { main, PLATFORM_PACKAGES, isBinaryPresent, getBinaryVersion, getExpectedVersion };
+module.exports = { main, PLATFORM_PACKAGES, isBinaryPresent, ensureExecutable, getBinaryVersion, getExpectedVersion };
 
 if (require.main === module) {
   main();

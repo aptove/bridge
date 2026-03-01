@@ -220,6 +220,29 @@ test('exits 0 and warns when update fails', () => {
   fs.rmSync(tmp, { recursive: true });
 });
 
+// Skip permission test on Windows — chmod doesn't apply there
+if (process.platform !== 'win32') {
+  test('fixes execute permissions when binary is present but not executable', () => {
+    const { tmp, baseDir, packageJsonPath, binDir } = makeLayout({ pkgVersion: '1.2.3' });
+
+    // Write binary WITHOUT execute bit (simulates GitHub artifact permission stripping)
+    fs.mkdirSync(binDir, { recursive: true });
+    const binaryPath = path.join(binDir, BINARY_NAME);
+    fs.writeFileSync(binaryPath, `#!/bin/sh\nprintf 'bridge 1.2.3'\n`, { mode: 0o644 });
+
+    const { exitCode, logs } = runMain({
+      baseDir,
+      packageJsonPath,
+      installFn: () => { throw new Error('should not call installFn when version is correct'); },
+    });
+
+    assert.strictEqual(exitCode, 0);
+    assert.ok(logs.some(l => l.includes('✓') && l.includes('1.2.3')), 'should log success after fixing permissions');
+
+    fs.rmSync(tmp, { recursive: true });
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Results
 // ---------------------------------------------------------------------------
