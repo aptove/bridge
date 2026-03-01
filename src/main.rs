@@ -13,7 +13,7 @@ use bridge::qr as qr;
 use bridge::tailscale::{is_tailscale_available, is_tailscale_installed, get_tailscale_ipv4, get_tailscale_hostname, tailscale_serve_start, TailscaleServeGuard};
 
 #[derive(Parser)]
-#[command(name = "bridge")]
+#[command(name = "bridge", version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Bridge stdio-based ACP agents to mobile apps", long_about = None)]
 struct Cli {
     /// Custom configuration directory (default: system config location)
