@@ -59,6 +59,13 @@ enum Commands {
         #[arg(short, long, default_value = "0.0.0.0")]
         bind: String,
 
+        /// Override the advertised LAN address in the QR code pairing URL.
+        /// Useful when running in Docker or Apple Native containers with -p port
+        /// forwarding, where the auto-detected IP is an internal virtual address.
+        /// Example: --advertise-addr 192.168.1.50
+        #[arg(long)]
+        advertise_addr: Option<String>,
+
         /// Print connection QR code(s) at startup so you can scan with the Aptove mobile app
         #[arg(short = 'Q', long)]
         qr: bool,
@@ -211,6 +218,7 @@ fn build_transport(
     transport_cfg: &TransportConfig,
     common: &CommonConfig,
     config_dir: &std::path::PathBuf,
+    advertise_addr: Option<&str>,
 ) -> Result<(String, PairingManager, Option<TlsConfig>, Option<TailscaleServeGuard>, Option<CloudflaredRunner>)> {
     // tailscale-serve binds to localhost only and needs its own port so it doesn't
     // conflict with the local transport that may also be active on 8765.
@@ -313,9 +321,12 @@ fn build_transport(
                 None
             };
             let cert_fingerprint = tls_config.as_ref().map(|t| t.fingerprint.clone());
-            let ip = match local_ip_address::local_ip() {
-                Ok(addr) => addr.to_string(),
-                Err(_) => "127.0.0.1".to_string(),
+            let ip = match advertise_addr {
+                Some(addr) => addr.to_string(),
+                None => match local_ip_address::local_ip() {
+                    Ok(addr) => addr.to_string(),
+                    Err(_) => "127.0.0.1".to_string(),
+                },
             };
             let protocol = if tls_config.is_some() { "wss" } else { "ws" };
             let hostname = format!("{}://{}:{}", protocol, ip, port);
@@ -510,7 +521,7 @@ async fn main() -> Result<()> {
             println!("\n🚀 Start the bridge with: bridge run --agent-command \"gemini --experimental-acp\"");
         }
 
-        Commands::Run { agent_command, bind, qr, verbose: _ } => {
+        Commands::Run { agent_command, bind, advertise_addr, qr, verbose: _ } => {
             info!("🌉 Starting ACP Bridge...");
 
             // Load (or initialise) the common config
@@ -570,7 +581,7 @@ async fn main() -> Result<()> {
             };
 
             let (hostname, pm, tls_config, _ts_guard, _cf_runner) =
-                build_transport(&transport_name, &transport_cfg, &config, &config_dir)?;
+                build_transport(&transport_name, &transport_cfg, &config, &config_dir, advertise_addr.as_deref())?;
 
             if qr {
                 if transport_name == "cloudflare" {
