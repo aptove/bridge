@@ -1,6 +1,6 @@
 [package]
 name = "aptove-bridge"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 authors = ["Saltuk Alakus <saltukalakus@gmail.com>"]
 description = "A secure bridge between ACP agents and clients"

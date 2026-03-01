@@ -22,16 +22,27 @@ if (!packageName) {
 }
 
 const binaryName = process.platform === 'win32' ? 'bridge.exe' : 'bridge';
-let binaryPath;
 
-try {
-  const packageJsonPath = require.resolve(`${packageName}/package.json`);
-  const candidate = path.join(path.dirname(packageJsonPath), 'bin', binaryName);
-  if (fs.existsSync(candidate)) {
-    binaryPath = candidate;
+// Both @aptove/bridge and @aptove/bridge-<platform> live under the same
+// @aptove scope directory, so the platform package is always a sibling:
+//   __dirname = .../node_modules/@aptove/bridge/bin
+//   platform  = .../node_modules/@aptove/bridge-darwin-arm64/bin/bridge
+const shortName = packageName.split('/')[1]; // e.g. "bridge-darwin-arm64"
+const siblingPath = path.join(__dirname, '..', '..', shortName, 'bin', binaryName);
+
+let binaryPath = fs.existsSync(siblingPath) ? siblingPath : null;
+
+// Fallback: require.resolve handles pnpm virtual stores and other layouts
+if (!binaryPath) {
+  try {
+    const pkgJson = require.resolve(`${packageName}/package.json`);
+    const candidate = path.join(path.dirname(pkgJson), 'bin', binaryName);
+    if (fs.existsSync(candidate)) {
+      binaryPath = candidate;
+    }
+  } catch (e) {
+    // not found
   }
-} catch (e) {
-  // package not installed
 }
 
 if (!binaryPath) {
