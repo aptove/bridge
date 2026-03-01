@@ -19,37 +19,24 @@ const PLATFORM_PACKAGES = {
   'win32-x64':    '@aptove/bridge-win32-x64',
 };
 
-const platformKey = `${process.platform}-${process.arch}`;
-const packageName = PLATFORM_PACKAGES[platformKey];
-
-if (!packageName) {
-  console.warn(`⚠️  bridge: unsupported platform ${platformKey}`);
-  process.exit(0);
+function isBinaryPresent(binaryPath) {
+  return fs.existsSync(binaryPath);
 }
 
-const binaryName = process.platform === 'win32' ? 'bridge.exe' : 'bridge';
-const shortName = packageName.split('/')[1]; // e.g. "bridge-darwin-arm64"
-
-// postinstall.js lives at @aptove/bridge/postinstall.js
-// platform binary lives at @aptove/bridge-darwin-arm64/bin/bridge (sibling package)
-const siblingBinaryPath = path.join(__dirname, '..', shortName, 'bin', binaryName);
-
-function isBinaryPresent() {
-  return fs.existsSync(siblingBinaryPath);
-}
-
-// Returns the version string from `bridge --version` (e.g. "0.1.11"), or null on failure.
-function getBinaryVersion() {
-  const result = spawnSync(siblingBinaryPath, ['--version'], { stdio: 'pipe' });
+// Returns the version string from `bridge --version` (e.g. "0.1.12"), or null on failure.
+function getBinaryVersion(binaryPath) {
+  const result = spawnSync(binaryPath, ['--version'], { stdio: 'pipe' });
   if (result.error || result.status !== 0) return null;
-  const output = (result.stdout || '').toString().trim(); // e.g. "bridge 0.1.11"
+  const output = (result.stdout || '').toString().trim(); // e.g. "bridge 0.1.12"
   const parts = output.split(' ');
   return parts.length >= 2 ? parts[1] : output;
 }
 
-function getExpectedVersion() {
+// Reads the expected platform package version from the main package's optionalDependencies.
+function getExpectedVersion(packageJsonPath) {
   try {
-    const pkg = require('./package.json');
+    delete require.cache[require.resolve(packageJsonPath)];
+    const pkg = require(packageJsonPath);
     // optionalDependencies values are updated by the release workflow to match the published version
     const deps = pkg.optionalDependencies || {};
     const versions = Object.values(deps).filter(v => v !== '*');
@@ -59,70 +46,107 @@ function getExpectedVersion() {
   }
 }
 
-function installPlatformPackage(version) {
-  // During `npm install -g`, npm_config_prefix points to the global prefix.
-  // Installing with --prefix ensures the package lands in the same global node_modules tree.
-  const prefix = process.env.npm_config_prefix;
-  const prefixFlag = prefix ? `--prefix "${prefix}"` : '';
-  console.log(`  Installing ${packageName}@${version}...`);
-  execSync(
-    `npm install ${prefixFlag} --no-save --no-audit --no-fund "${packageName}@${version}"`,
-    { stdio: 'inherit' }
-  );
-}
+/**
+ * Main postinstall logic.
+ *
+ * All I/O is injectable for testing:
+ *   baseDir        — replaces __dirname for computing the sibling binary path
+ *   packageJsonPath— path to the main package's package.json
+ *   platformKey    — override platform detection (default: process.platform-process.arch)
+ *   npmPrefix      — override npm_config_prefix
+ *   installFn      — (packageName, version) => void; throws on failure
+ *                    defaults to running `npm install` via execSync
+ *   log / warn     — console.log / console.warn replacements
+ *   exitFn         — process.exit replacement
+ */
+function main({
+  baseDir = __dirname,
+  packageJsonPath = path.join(__dirname, 'package.json'),
+  platformKey = `${process.platform}-${process.arch}`,
+  npmPrefix = process.env.npm_config_prefix,
+  installFn = null,
+  log = (...a) => console.log(...a),
+  warn = (...a) => console.warn(...a),
+  exitFn = process.exit,
+} = {}) {
+  const packageName = PLATFORM_PACKAGES[platformKey];
 
-function tryInstall(version) {
-  try {
-    installPlatformPackage(version);
-    return true;
-  } catch (e) {
-    return false;
+  if (!packageName) {
+    warn(`⚠️  bridge: unsupported platform ${platformKey}`);
+    exitFn(0); return;
   }
-}
 
-// --- Main ---
+  const binaryName = process.platform === 'win32' ? 'bridge.exe' : 'bridge';
+  const shortName = packageName.split('/')[1]; // e.g. "bridge-darwin-arm64"
 
-const expectedVersion = getExpectedVersion();
+  // postinstall.js lives at @aptove/bridge/postinstall.js
+  // platform binary lives at @aptove/bridge-darwin-arm64/bin/bridge (sibling package)
+  const siblingBinaryPath = path.join(baseDir, '..', shortName, 'bin', binaryName);
 
-// Check if binary is present and at the correct version.
-if (isBinaryPresent()) {
-  const installedVersion = getBinaryVersion();
-  if (installedVersion && expectedVersion && installedVersion !== expectedVersion) {
-    console.log(`⬆  bridge: updating platform binary ${installedVersion} → ${expectedVersion}...`);
-    if (!tryInstall(expectedVersion)) {
-      console.warn(`⚠️  bridge: update failed — run: npm install -g ${packageName}@${expectedVersion}`);
-      process.exit(0);
+  function tryInstall(version) {
+    const fn = installFn || ((pkg, ver) => {
+      const prefixFlag = npmPrefix ? `--prefix "${npmPrefix}"` : '';
+      execSync(
+        `npm install ${prefixFlag} --no-save --no-audit --no-fund "${pkg}@${ver}"`,
+        { stdio: 'inherit' }
+      );
+    });
+    try {
+      log(`  Installing ${packageName}@${version}...`);
+      fn(packageName, version);
+      return true;
+    } catch (e) {
+      return false;
     }
-  } else {
-    const version = installedVersion || getBinaryVersion();
-    console.log(`✓ bridge ${version || installedVersion} installed successfully for ${platformKey}`);
-    process.exit(0);
   }
-} else {
-  // Optional dependency was not installed (common with `npm install -g`).
-  console.log(`\n⬇  bridge: platform binary not found, installing ${packageName}...`);
-  if (!tryInstall(expectedVersion || 'latest')) {
-    console.warn(`\n⚠️  bridge: failed to install ${packageName}`);
-    console.warn(`   Run manually: npm install -g ${packageName}${expectedVersion ? '@' + expectedVersion : ''}`);
-    process.exit(0);
-  }
-}
 
-// Validate after install using sibling path directly.
-// (require.resolve cannot be used here — Node.js caches negative module
-// resolution results within the same process.)
-if (isBinaryPresent()) {
-  const installedVersion = getBinaryVersion();
-  if (installedVersion) {
-    if (expectedVersion && installedVersion !== expectedVersion) {
-      console.warn(`⚠️  bridge: installed ${installedVersion} but expected ${expectedVersion} (may not be published yet)`);
+  const expectedVersion = getExpectedVersion(packageJsonPath);
+
+  if (isBinaryPresent(siblingBinaryPath)) {
+    const installedVersion = getBinaryVersion(siblingBinaryPath);
+    if (installedVersion && expectedVersion && installedVersion !== expectedVersion) {
+      log(`⬆  bridge: updating platform binary ${installedVersion} → ${expectedVersion}...`);
+      if (!tryInstall(expectedVersion)) {
+        warn(`⚠️  bridge: update failed — run: npm install -g ${packageName}@${expectedVersion}`);
+        exitFn(0); return;
+      }
     } else {
-      console.log(`✓ bridge ${installedVersion} installed successfully for ${platformKey}`);
+      log(`✓ bridge ${installedVersion || '(unknown)'} installed successfully for ${platformKey}`);
+      exitFn(0); return;
     }
   } else {
-    console.warn(`⚠️  bridge: binary present but failed to run — try: ${siblingBinaryPath} --version`);
+    log(`\n⬇  bridge: platform binary not found, installing ${packageName}...`);
+    if (!tryInstall(expectedVersion || 'latest')) {
+      warn(`\n⚠️  bridge: failed to install ${packageName}`);
+      warn(`   Run manually: npm install -g ${packageName}${expectedVersion ? '@' + expectedVersion : ''}`);
+      exitFn(0); return;
+    }
   }
-} else {
-  console.warn(`\n⚠️  bridge: binary not found after installation`);
-  console.warn(`   Run manually: npm install -g ${packageName}${expectedVersion ? '@' + expectedVersion : ''}`);
+
+  // Validate after install using sibling path directly.
+  // (require.resolve cannot be used here — Node.js caches negative module
+  // resolution results within the same process.)
+  if (isBinaryPresent(siblingBinaryPath)) {
+    const installedVersion = getBinaryVersion(siblingBinaryPath);
+    if (installedVersion) {
+      if (expectedVersion && installedVersion !== expectedVersion) {
+        warn(`⚠️  bridge: installed ${installedVersion} but expected ${expectedVersion} (may not be published yet)`);
+      } else {
+        log(`✓ bridge ${installedVersion} installed successfully for ${platformKey}`);
+      }
+    } else {
+      warn(`⚠️  bridge: binary present but failed to run — try: ${siblingBinaryPath} --version`);
+    }
+  } else {
+    warn(`\n⚠️  bridge: binary not found after installation`);
+    warn(`   Run manually: npm install -g ${packageName}${expectedVersion ? '@' + expectedVersion : ''}`);
+  }
+
+  exitFn(0);
+}
+
+module.exports = { main, PLATFORM_PACKAGES, isBinaryPresent, getBinaryVersion, getExpectedVersion };
+
+if (require.main === module) {
+  main();
 }

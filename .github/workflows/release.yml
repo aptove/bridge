@@ -322,11 +322,26 @@ jobs:
           path: npm/bridge-${{ matrix.npm_arch }}/
           if-no-files-found: error
 
+  test-postinstall:
+    needs:
+      - npm-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run postinstall tests
+        run: node npm/bridge/test-postinstall.js
+
   publish-npm:
     needs:
       - host
       - npm-build
-    if: ${{ always() && needs.host.result == 'success' && needs.npm-build.result == 'success' }}
+      - test-postinstall
+    if: ${{ always() && needs.host.result == 'success' && needs.npm-build.result == 'success' && needs.test-postinstall.result == 'success' }}
     runs-on: ubuntu-latest
 
     steps:
