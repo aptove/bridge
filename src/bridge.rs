@@ -3,6 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -936,7 +937,15 @@ where
     let needs_init_capture = !was_reused;
     let token_for_capture = token.clone();
     let pool_for_capture = Arc::clone(&pool);
-    
+
+    // Keepalive / zombie-connection detection.
+    // Starts as `true` (healthy). Task 2 swaps it to `false` each time it sends a
+    // Ping; Task 1 resets it to `true` when a Pong arrives. If it is still `false`
+    // on the next ping interval the client is considered dead and the connection is
+    // closed so the rate-limiter slot is freed.
+    let pong_received = Arc::new(AtomicBool::new(true));
+    let pong_received_for_receiver = Arc::clone(&pong_received);
+
     // Task 1: WebSocket → Agent (via channel)
     let ws_to_agent_tx_clone = ws_to_agent_tx.clone();
     let push_relay_for_register = push_relay.clone();
@@ -998,6 +1007,9 @@ where
                             break;
                         }
                         debug!("✅ Forwarded to agent");
+                    } else if msg.is_pong() {
+                        pong_received_for_receiver.store(true, Ordering::Relaxed);
+                        debug!("📶 Pong received from client");
                     } else if msg.is_close() {
                         info!("📱 Client closed connection");
                         break;
@@ -1019,8 +1031,13 @@ where
     let agent_to_ws = tokio::spawn(async move {
         let mut init_captured = false;
         let mut session_captured = false;
+        // Send a Ping every 30 s; if no Pong arrives before the next Ping the
+        // connection is treated as dead and closed (frees the rate-limiter slot).
+        let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+        ping_interval.tick().await; // skip the immediate first tick
         loop {
-            match agent_to_ws_rx.recv().await {
+            tokio::select! {
+                result = agent_to_ws_rx.recv() => { match result {
                 Ok(line) => {
                     // On first connection, capture the initialize response
                     if needs_init_capture && !init_captured {
@@ -1069,9 +1086,22 @@ where
                     debug!("Agent broadcast channel closed (agent exited)");
                     break;
                 }
+            } } // end match result / end recv arm
+            _ = ping_interval.tick() => {
+                // If the previous ping went unanswered the client is gone.
+                if !pong_received.swap(false, Ordering::Relaxed) {
+                    warn!("💀 Ping timeout: no pong from client, closing dead connection");
+                    break;
+                }
+                debug!("📶 Sending WebSocket ping to client");
+                if let Err(e) = ws_sender.send(Message::Ping(vec![])).await {
+                    debug!("Ping send failed (client disconnected): {}", e);
+                    break;
+                }
             }
+            } // end select!
         }
-        
+
         debug!("Agent-to-WS forwarder task ended");
         let _ = shutdown_tx_clone.send(()).await;
     });
