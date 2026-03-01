@@ -40,19 +40,52 @@ tls     = true    # default: true
 ## Starting the Bridge
 
 ```bash
-bridge run --agent-command "gemini --experimental-acp" --qr
+bridge run --agent-command "aptove" --qr
 ```
 
-The bridge reads port, TLS, and auth token settings from `common.toml` — no flags needed.
+The bridge reads port, TLS, and auth token settings from `common.toml` — no flags needed for those.
 
-**Available `start` flags:**
+**Available `run` flags:**
 
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--agent-command <CMD>` | Command to spawn the ACP agent | Required |
-| `--bind <ADDR>` | Bind address | `0.0.0.0` |
+| `--bind <ADDR>` | Bind address for the WebSocket server | `0.0.0.0` |
+| `--advertise-addr <IP>` | IP or hostname advertised in the QR code and embedded in the TLS cert SANs. Required when the bridge's local IP differs from the address reachable by clients (e.g. inside a container). | Auto-detected |
 | `--qr` | Display QR code for mobile pairing | Off |
 | `--verbose` | Enable info-level logging | Off |
+
+---
+
+## Container Usage
+
+When running the bridge inside a Docker or Apple Native container, the bridge's
+local IP is the container's internal virtual IP — not your machine's LAN IP.
+Use `--advertise-addr` to override both the QR code URL **and** the TLS
+certificate's Subject Alternative Names (SANs) so mobile clients can connect:
+
+```bash
+# Docker
+docker run -p 8765:8765 \
+  -v "$HOME/Library/Application Support/com.aptove.bridge":/root/.config/bridge \
+  aptove/bridge \
+  run --agent-command "aptove" --advertise-addr 192.168.1.50 --qr
+
+# Apple Native container (macOS)
+container run -p 8765:8765 \
+  -v "$HOME/Library/Application Support/com.aptove.bridge":/root/.config/bridge \
+  aptove/bridge \
+  run --agent-command "aptove" --advertise-addr 192.168.1.50 --qr
+```
+
+> **Important:** If you add `--advertise-addr` for the first time (or change the
+> IP), the existing TLS certificate is regenerated because the SANs changed.
+> You will need to delete the old cert files and re-pair the mobile app:
+>
+> ```bash
+> rm ~/Library/Application\ Support/com.aptove.bridge/cert.pem
+> rm ~/Library/Application\ Support/com.aptove.bridge/key.pem
+> ```
 
 ---
 
@@ -159,23 +192,53 @@ If the bridge is not running, this starts a lightweight pairing-only server, sho
 | Usage | Single-use | Prevents replay attacks |
 | Attempts | 5 max | Prevents brute-force |
 
-### TLS Certificate Pinning
+### TLS Certificate
 
-The bridge generates a self-signed TLS certificate on first run. The certificate fingerprint is included in the QR pairing URL and must be validated by the mobile app before trusting the connection.
+The bridge generates a self-signed TLS certificate on first run and saves it as
+`cert.pem` / `key.pem` in the config directory. The certificate includes the
+following Subject Alternative Names (SANs):
+
+- `localhost` and `127.0.0.1` (always)
+- The machine's detected local network IP (always, when available)
+- The `--advertise-addr` value (when provided)
+
+The certificate fingerprint is included in the QR pairing URL and must be
+validated by the mobile app before trusting the connection. The cert is reused
+across restarts; it is only regenerated when the SANs change (e.g. a new
+`--advertise-addr` is provided) or when `cert.pem` / `key.pem` are deleted.
 
 ### Credentials and Auth Token
 
-`auth_token` is auto-generated (32 bytes, URL-safe base64) and stored in `common.toml` with `0600` permissions. It persists across restarts — paired devices reconnect without re-scanning.
+`auth_token` is auto-generated (32 bytes, URL-safe base64) and stored in
+`common.toml` with `0600` permissions. It persists across restarts — paired
+devices reconnect without re-scanning.
 
 ### Rotating Credentials
 
-To regenerate `auth_token`, `agent_id`, and TLS cert (invalidates all paired devices):
+**Rotate TLS certificate only** (invalidates all paired devices — they must re-scan):
 
 ```bash
-rm ~/Library/Application\ Support/com.aptove.bridge/common.toml   # macOS
-rm ~/.config/bridge/common.toml                                    # Linux
-bridge run --agent-command "..." --qr
+# macOS
+rm ~/Library/Application\ Support/com.aptove.bridge/cert.pem \
+   ~/Library/Application\ Support/com.aptove.bridge/key.pem
+
+# Linux
+rm ~/.config/bridge/cert.pem ~/.config/bridge/key.pem
 ```
+
+**Full reset** (regenerates cert, auth token, and agent ID):
+
+```bash
+# macOS
+rm ~/Library/Application\ Support/com.aptove.bridge/cert.pem \
+   ~/Library/Application\ Support/com.aptove.bridge/key.pem \
+   ~/Library/Application\ Support/com.aptove.bridge/common.toml
+
+# Linux
+rm ~/.config/bridge/cert.pem ~/.config/bridge/key.pem ~/.config/bridge/common.toml
+```
+
+Then re-run `bridge run --agent-command "..." --qr`.
 
 ---
 
@@ -193,10 +256,10 @@ curl -k "https://192.168.1.100:8765/pair/local?code=847291"
 ### "Connection refused"
 - Ensure the bridge is running
 - Check firewall settings allow the configured port (default `8765`)
-- Run `bridge status` to confirm the port and IP
+- Verify the bridge is binding to the right interface (`--bind 0.0.0.0` by default)
 
 ### "Invalid code"
-- Codes expire after 60 seconds — re-run `bridge run --qr` to get a fresh code
+- Codes expire after 60 seconds — restart `bridge run --qr` to get a fresh code
 - Codes are single-use — scan only once
 - Check for typos if entering the code manually
 
@@ -204,9 +267,10 @@ curl -k "https://192.168.1.100:8765/pair/local?code=847291"
 - Too many failed pairing attempts on the current code
 - Restart the bridge to issue a fresh code
 
-### Certificate errors
-- Mobile apps must validate the fingerprint from the QR code `fp` parameter
-- The fingerprint is per-certificate — if you delete `common.toml` and restart, the cert changes and you must re-pair
+### TLS / certificate errors
+- Mobile apps validate the fingerprint from the QR code `fp` parameter — ensure the app scanned the most recent QR
+- If running in a container, use `--advertise-addr <LAN_IP>` so the cert includes the correct IP in its SANs; then delete `cert.pem` / `key.pem` and re-pair
+- If you deleted `cert.pem` / `key.pem` and restarted, the fingerprint changed — re-pair all devices
 
 ---
 
