@@ -314,9 +314,14 @@ fn build_transport(
         }
 
         _ => {
-            // "local" and any unknown transports — local network with self-signed TLS
+            // "local" and any unknown transports — local network with self-signed TLS.
+            // Include the advertise_addr in the cert SANs so iOS TLS validation passes
+            // when connecting via the LAN IP (e.g. from a container with --advertise-addr).
+            let extra_sans: Vec<String> = advertise_addr
+                .map(|a| vec![a.to_string()])
+                .unwrap_or_default();
             let tls_config = if use_tls {
-                Some(TlsConfig::load_or_generate(config_dir, &[])?)
+                Some(TlsConfig::load_or_generate(config_dir, &extra_sans)?)
             } else {
                 None
             };
