@@ -527,7 +527,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Run { agent_command, bind, advertise_addr, qr, verbose: _ } => {
-            info!("🌉 Starting ACP Bridge...");
+            info!("🌉 Starting ACP Bridge v{}", env!("CARGO_PKG_VERSION"));
 
             // Load (or initialise) the common config
             let mut config = CommonConfig::load()?;

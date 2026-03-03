@@ -1,5 +1,8 @@
 //! ACP Bridge library — exposes all modules for use as a library dependency.
 
+/// The version of this bridge crate, extracted at compile time from Cargo.toml.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod agent_pool;
 pub mod bridge;
 pub mod cloudflare;
