@@ -1378,6 +1378,10 @@ where
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
     // Task 1: WebSocket → agent channel
+    // Capture shutdown_tx so that when the WebSocket closes, we signal shutdown
+    // immediately. Without this, agent_to_ws holds the stdout_rx mutex indefinitely,
+    // blocking the next connection from acquiring it.
+    let shutdown_tx_ws = shutdown_tx.clone();
     let ws_to_agent = tokio::spawn(async move {
         while let Some(msg_result) = ws_receiver.next().await {
             match msg_result {
@@ -1398,6 +1402,7 @@ where
             }
         }
         debug!("ws_to_agent task ended");
+        let _ = shutdown_tx_ws.send(()).await;
     });
 
     // Task 2: agent channel → WebSocket
