@@ -1377,10 +1377,14 @@ where
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
+    // Dedicated channel so that ws_to_agent can tell agent_to_ws to stop
+    // reading stdout_rx the moment the WebSocket closes. This prevents the
+    // outgoing task from consuming messages (e.g. an initialize response)
+    // that were meant for the *next* connection, which would cause the new
+    // connection to time out waiting for a reply that was already discarded.
+    let (agent_stop_tx, mut agent_stop_rx) = mpsc::channel::<()>(1);
+
     // Task 1: WebSocket → agent channel
-    // Capture shutdown_tx so that when the WebSocket closes, we signal shutdown
-    // immediately. Without this, agent_to_ws holds the stdout_rx mutex indefinitely,
-    // blocking the next connection from acquiring it.
     let shutdown_tx_ws = shutdown_tx.clone();
     let ws_to_agent = tokio::spawn(async move {
         while let Some(msg_result) = ws_receiver.next().await {
@@ -1402,6 +1406,9 @@ where
             }
         }
         debug!("ws_to_agent task ended");
+        // Stop agent_to_ws before signalling main, so the mutex is released
+        // before handle_websocket_inprocess returns and a new connection begins.
+        let _ = agent_stop_tx.send(()).await;
         let _ = shutdown_tx_ws.send(()).await;
     });
 
@@ -1409,17 +1416,32 @@ where
     let shutdown_tx_clone = shutdown_tx.clone();
     let agent_to_ws = tokio::spawn(async move {
         let mut rx = stdout_rx.lock().await;
-        while let Some(bytes) = rx.recv().await {
-            let line = String::from_utf8_lossy(&bytes).trim_end_matches('\n').to_string();
-            debug!("📤 agent→WS ({} bytes)", line.len());
-            if let Err(e) = ws_sender.send(Message::Text(line)).await {
-                let msg = e.to_string();
-                if msg.contains("Sending after closing") || msg.contains("connection closed") {
-                    debug!("WebSocket closed before message could be sent (client disconnected)");
-                } else {
-                    error!("Failed to send to WebSocket: {}", e);
+        loop {
+            tokio::select! {
+                bytes_opt = rx.recv() => {
+                    match bytes_opt {
+                        Some(bytes) => {
+                            let line = String::from_utf8_lossy(&bytes).trim_end_matches('\n').to_string();
+                            debug!("📤 agent→WS ({} bytes)", line.len());
+                            if let Err(e) = ws_sender.send(Message::Text(line)).await {
+                                let msg = e.to_string();
+                                if msg.contains("Sending after closing") || msg.contains("connection closed") {
+                                    debug!("WebSocket closed before message could be sent (client disconnected)");
+                                } else {
+                                    error!("Failed to send to WebSocket: {}", e);
+                                }
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
                 }
-                break;
+                _ = agent_stop_rx.recv() => {
+                    // WebSocket is closing; exit immediately so the stdout_rx
+                    // mutex is released before the next connection acquires it.
+                    debug!("agent_to_ws: stop signal received, releasing stdout_rx");
+                    break;
+                }
             }
         }
         let _ = shutdown_tx_clone.send(()).await;
@@ -1427,7 +1449,9 @@ where
 
     shutdown_rx.recv().await;
     ws_to_agent.abort();
-    agent_to_ws.abort();
+    // Await (not just abort) so we guarantee the stdout_rx mutex is released
+    // before this function returns and any new connection handler starts.
+    let _ = agent_to_ws.await;
 
     Ok(())
 }
