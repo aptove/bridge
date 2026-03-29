@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -92,6 +93,7 @@ pub struct AgentPool {
     pub(crate) agents: HashMap<String, PooledAgent>,
     config: PoolConfig,
     push_relay: Option<Arc<PushRelayClient>>,
+    working_dir: PathBuf,
 }
 
 impl AgentPool {
@@ -100,7 +102,14 @@ impl AgentPool {
             agents: HashMap::new(),
             config,
             push_relay: None,
+            working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }
+    }
+
+    /// Set the working directory for spawned agent processes.
+    pub fn with_working_dir(mut self, dir: PathBuf) -> Self {
+        self.working_dir = dir;
+        self
     }
 
     /// Set the push relay client for sending notifications
@@ -181,11 +190,9 @@ impl AgentPool {
         let command = parts[0];
         let args = &parts[1..];
 
-        let cwd = std::env::current_dir()
-            .context("Failed to determine current working directory")?;
         let mut child = Command::new(command)
             .args(args)
-            .current_dir(&cwd)
+            .current_dir(&self.working_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
