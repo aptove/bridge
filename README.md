@@ -101,7 +101,7 @@ cargo build --release
 
 # Start with local transport (default — no config needed)
 ./target/release/bridge run \
-  --agent-command "gemini --experimental-acp" \
+  --agent-command "copilot --acp" \
   --qr
 ```
 
@@ -120,7 +120,7 @@ All transport settings live in `common.toml`. The file is created automatically 
 
 Override with `--config-dir`:
 ```bash
-bridge --config-dir ./my-config run --agent-command "gemini --experimental-acp"
+bridge --config-dir ./my-config run --agent-command "copilot --acp"
 ```
 
 #### Example `common.toml`
@@ -256,21 +256,23 @@ No subprocess is spawned. Agent and bridge communicate via in-process channels.
 
 ```bash
 # Enable verbose logging
-bridge run --agent-command "gemini --experimental-acp" --verbose
+bridge run --agent-command "copilot --acp" --verbose
 
 # Check which transports are configured
 bridge status
 
 # Test agent command independently
-echo '{"jsonrpc":"2.0","method":"initialize","id":1}' | gemini --experimental-acp
+echo '{"jsonrpc":"2.0","method":"initialize","id":1}' | copilot --acp
 ```
 
-### Testing with ACP-Compatible Agents
+### Testing with Other ACP-Compatible Agents
 
-#### GitHub Copilot
+Please note that the project is extensively tested only with Copilot CLI. Open a bug report if you notice any issues with other ACP-Compatible Agents
+
+#### Gemini CLI
 
 ```bash
-bridge run --agent-command "copilot --acp" --qr --verbose
+bridge run --agent-command "gemini --experimental-acp" --qr --verbose
 ```
 
 #### Goose

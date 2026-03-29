@@ -51,7 +51,7 @@ enum Commands {
 
     /// Run the bridge server (reads transport config from common.toml)
     Run {
-        /// Command to run the ACP agent (e.g., "gemini --experimental-acp")
+        /// Command to run the ACP agent (e.g., "copilot --acp")
         #[arg(short, long)]
         agent_command: String,
 
@@ -523,7 +523,7 @@ async fn main() -> Result<()> {
             let json = config.to_connection_json()?;
             qr::display_qr_code(&json, "cloudflare")?;
             println!("\n⚠️  Important: Keep your configuration file secure. It contains sensitive credentials.");
-            println!("\n🚀 Start the bridge with: bridge run --agent-command \"gemini --experimental-acp\"");
+            println!("\n🚀 Start the bridge with: bridge run --agent-command \"copilot --acp\"");
         }
 
         Commands::Run { agent_command, bind, advertise_addr, qr, verbose: _ } => {

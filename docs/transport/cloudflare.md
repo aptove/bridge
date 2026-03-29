@@ -90,7 +90,7 @@ client_secret = "xxxxx"
 ## Starting the Bridge
 
 ```bash
-bridge run --agent-command "gemini --experimental-acp" --qr
+bridge run --agent-command "copilot --acp" --qr
 ```
 
 Transport selection is read from `common.toml` — no `--cloudflare` flag is needed. The bridge:

@@ -17,7 +17,7 @@ cargo run --release -- setup \
 #    --cloudflare spawns `cloudflared tunnel run` automatically.
 #    Requires cloudflared to be installed: brew install cloudflare/cloudflare/cloudflared
 cargo run --release -- start \
-  --agent-command "gemini --experimental-acp" \
+  --agent-command "copilot --acp" \
   --cloudflare \
   --qr
 

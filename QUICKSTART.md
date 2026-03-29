@@ -23,7 +23,7 @@ No configuration needed. On first run, `common.toml` is created automatically wi
 
 ```bash
 bridge run \
-  --agent-command "gemini --experimental-acp" \
+  --agent-command "copilot --acp" \
   --qr
 ```
 
@@ -71,7 +71,7 @@ client_secret = "xxxxx"
 ### 3. Start
 
 ```bash
-bridge run --agent-command "gemini --experimental-acp" --qr
+bridge run --agent-command "copilot --acp" --qr
 ```
 
 ---
@@ -93,7 +93,7 @@ tls     = true
 Then start normally:
 
 ```bash
-bridge run --agent-command "gemini --experimental-acp" --qr
+bridge run --agent-command "copilot --acp" --qr
 ```
 
 ---
@@ -116,7 +116,7 @@ enabled = true
 ```
 
 ```bash
-bridge run --agent-command "gemini --experimental-acp" --qr
+bridge run --agent-command "copilot --acp" --qr
 ```
 
 All enabled transports start concurrently. The mobile app tries them in priority order (tailscale-serve → tailscale-ip → cloudflare → local) and connects via the first that succeeds.
@@ -190,7 +190,7 @@ When using `aptove run`, the config is shared across all workspaces.
 Override with `--config-dir`:
 
 ```bash
-bridge --config-dir ./my-config start --agent-command "gemini --experimental-acp"
+bridge --config-dir ./my-config start --agent-command "copilot --acp"
 ```
 
 ### Rotating Credentials
@@ -214,7 +214,7 @@ bridge run --agent-command "aptove stdio" --qr
 ## Common Issues
 
 ### Agent fails to start
-- Test the command manually: `gemini --experimental-acp`
+- Test the command manually: `copilot --acp`
 - Ensure the agent binary is installed and on your `PATH`
 
 ### QR code not scanning
