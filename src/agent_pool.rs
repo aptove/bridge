@@ -190,6 +190,8 @@ impl AgentPool {
         let command = parts[0];
         let args = &parts[1..];
 
+        info!("🚀 Spawning pooled agent: {} {:?} (cwd: {})", command, args, self.working_dir.display());
+
         let mut child = Command::new(command)
             .args(args)
             .current_dir(&self.working_dir)

@@ -66,10 +66,6 @@ enum Commands {
         #[arg(long)]
         advertise_addr: Option<String>,
 
-        /// Print connection QR code(s) at startup so you can scan with the Aptove mobile app
-        #[arg(short = 'Q', long)]
-        qr: bool,
-
         /// Enable verbose logging (shows info level logs)
         #[arg(short, long)]
         verbose: bool,
@@ -219,6 +215,7 @@ fn build_transport(
     common: &CommonConfig,
     config_dir: &std::path::PathBuf,
     advertise_addr: Option<&str>,
+    cwd: &str,
 ) -> Result<(String, PairingManager, Option<TlsConfig>, Option<TailscaleServeGuard>, Option<CloudflaredRunner>)> {
     // tailscale-serve binds to localhost only and needs its own port so it doesn't
     // conflict with the local transport that may also be active on 8765.
@@ -242,6 +239,7 @@ fn build_transport(
                 None,
                 client_id,
                 client_secret,
+                cwd.to_string(),
             );
 
             // Start cloudflared
@@ -276,6 +274,7 @@ fn build_transport(
                 None,
                 None,
                 None,
+                cwd.to_string(),
             ).with_tailscale_path();
 
             info!("🌐 Starting tailscale serve...");
@@ -308,6 +307,7 @@ fn build_transport(
                 cert_fingerprint,
                 None,
                 None,
+                cwd.to_string(),
             ).with_tailscale_path();
 
             Ok((hostname, pm, tls_config, None, None))
@@ -343,6 +343,7 @@ fn build_transport(
                 cert_fingerprint,
                 None,
                 None,
+                cwd.to_string(),
             );
 
             Ok((hostname, pm, tls_config, None, None))
@@ -526,7 +527,7 @@ async fn main() -> Result<()> {
             println!("\n🚀 Start the bridge with: bridge run --agent-command \"copilot --acp\"");
         }
 
-        Commands::Run { agent_command, bind, advertise_addr, qr, verbose: _ } => {
+        Commands::Run { agent_command, bind, advertise_addr, verbose: _ } => {
             info!("🌉 Starting ACP Bridge v{}", env!("CARGO_PKG_VERSION"));
 
             // Load (or initialise) the common config
@@ -585,16 +586,19 @@ async fn main() -> Result<()> {
                 bind.clone()
             };
 
-            let (hostname, pm, tls_config, _ts_guard, _cf_runner) =
-                build_transport(&transport_name, &transport_cfg, &config, &config_dir, advertise_addr.as_deref())?;
+            let cwd = std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .to_string_lossy()
+                .to_string();
 
-            if qr {
-                if transport_name == "cloudflare" {
-                    let json = config.to_connection_json(&hostname, &transport_name)?;
-                    qr::display_qr_code(&json, &transport_name)?;
-                } else {
-                    qr::display_qr_code_with_pairing(&hostname, &pm)?;
-                }
+            let (hostname, pm, tls_config, _ts_guard, _cf_runner) =
+                build_transport(&transport_name, &transport_cfg, &config, &config_dir, advertise_addr.as_deref(), &cwd)?;
+
+            if transport_name == "cloudflare" {
+                let json = config.to_connection_json(&hostname, &transport_name)?;
+                qr::display_qr_code(&json, &transport_name)?;
+            } else {
+                qr::display_qr_code_with_pairing(&hostname, &pm)?;
             }
 
             info!("📡 Starting WebSocket server on {}:{} (transport: {})", effective_bind, port, transport_name);

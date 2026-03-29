@@ -652,6 +652,7 @@ where
     Ok(())
 }
 
+
 /// Verify an HMAC-SHA256 signature.
 /// `signature` is expected in the form `sha256=<hex>` (GitHub style) or plain hex.
 fn verify_hmac_sha256(secret: &str, body: &[u8], signature: &str) -> bool {
@@ -863,7 +864,7 @@ where
             handle_websocket_with_handle(ws_stream, agent_handle, push_relay, working_dir).await
         } else {
             if let AgentHandle::Command(ref cmd) = agent_handle {
-                handle_websocket_pooled(ws_stream, cmd.clone(), client_token, pool, push_relay).await
+                handle_websocket_pooled(ws_stream, cmd.clone(), client_token, pool, push_relay, working_dir.clone()).await
             } else {
                 // InProcess handles don't support pooling yet; fall back to per-connection
                 handle_websocket_with_handle(ws_stream, agent_handle, push_relay, working_dir).await
@@ -881,12 +882,13 @@ async fn handle_websocket_pooled<S>(
     token: String,
     pool: Arc<tokio::sync::RwLock<AgentPool>>,
     push_relay: Option<Arc<PushRelayClient>>,
+    _working_dir: PathBuf,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
-    
+
     // Get or spawn agent from pool
     let (ws_to_agent_tx, mut agent_to_ws_rx, buffered, was_reused, cached_init, cached_session) = {
         let mut pool = pool.write().await;
@@ -969,9 +971,9 @@ where
                     if msg.is_text() || msg.is_binary() {
                         let data = msg.into_data();
                         let text = String::from_utf8_lossy(&data).to_string();
-                        debug!("📥 Received from Mobile ({} bytes): {}", data.len(), 
+                        debug!("📥 Received from Mobile ({} bytes): {}", text.len(),
                             text.chars().take(200).collect::<String>());
-                        
+
                         // Intercept bridge/registerPushToken notifications
                         if let Some(ref relay) = push_relay_for_register {
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -1487,7 +1489,7 @@ where
     let args = &parts[1..];
 
     // Spawn the ACP agent process
-    info!("🚀 Spawning agent: {} {:?}", command, args);
+    info!("🚀 Spawning agent: {} {:?} (cwd: {})", command, args, working_dir.display());
     
     let mut child = Command::new(command)
         .args(args)
@@ -1524,11 +1526,12 @@ where
             match msg_result {
                 Ok(msg) => {
                     if msg.is_text() || msg.is_binary() {
-                        let data = msg.into_data();
-                        debug!("📥 Received from Mobile ({} bytes): {}", data.len(), 
-                            String::from_utf8_lossy(&data).chars().take(200).collect::<String>());
-                        
-                        if let Err(e) = stdin_writer.write_all(&data).await {
+                        let raw = msg.into_data();
+                        let data = String::from_utf8_lossy(&raw);
+                        debug!("📥 Received from Mobile ({} bytes): {}", data.len(),
+                            data.chars().take(200).collect::<String>());
+
+                        if let Err(e) = stdin_writer.write_all(data.as_bytes()).await {
                             error!("Failed to write to agent stdin: {}", e);
                             break;
                         }

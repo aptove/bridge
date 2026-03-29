@@ -101,8 +101,7 @@ cargo build --release
 
 # Start with local transport (default — no config needed)
 ./target/release/bridge run \
-  --agent-command "copilot --acp" \
-  --qr
+  --agent-command "copilot --acp"
 ```
 
 Scan the QR code with the mobile app to connect.
@@ -166,8 +165,9 @@ bridge run --agent-command "<your-agent-command>"
 |------|-------------|---------|
 | `--agent-command <CMD>` | Command to spawn the ACP agent | Required |
 | `--bind <ADDR>` | Address to bind the listener | `0.0.0.0` |
-| `--qr` | Display QR code for pairing at startup | Off |
 | `--verbose` | Enable info-level logging | Off (warn only) |
+
+The QR code for pairing is always displayed at startup.
 
 Transport selection, port, TLS, and auth token are all read from `common.toml`.
 
@@ -178,12 +178,6 @@ bridge show-qr
 ```
 
 Displays the connection QR code for the currently active transport. The bridge must already be running. Use this to pair an additional device without restarting.
-
-To show the QR at initial startup, pass `--qr` to `bridge run` instead:
-
-```bash
-bridge run --agent-command "<your-agent-command>" --qr
-```
 
 #### `setup` — Provision Cloudflare infrastructure
 
@@ -272,13 +266,13 @@ Please note that the project is extensively tested only with Copilot CLI. Open a
 #### Gemini CLI
 
 ```bash
-bridge run --agent-command "gemini --experimental-acp" --qr --verbose
+bridge run --agent-command "gemini --experimental-acp" --verbose
 ```
 
 #### Goose
 
 ```bash
-bridge run --agent-command "goose acp" --qr --verbose
+bridge run --agent-command "goose acp" --verbose
 ```
 
 ---
@@ -298,7 +292,7 @@ rm ~/Library/Application\ Support/com.aptove.bridge/common.toml
 # Linux
 rm ~/.config/bridge/common.toml
 
-bridge run --agent-command "<your-agent-command>" --qr
+bridge run --agent-command "<your-agent-command>"
 ```
 
 ---

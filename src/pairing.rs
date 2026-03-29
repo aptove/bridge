@@ -30,6 +30,8 @@ pub struct PairingResponse {
     pub client_id: Option<String>,
     #[serde(rename = "clientSecret", skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
+    /// The working directory where the bridge was started.
+    pub cwd: String,
 }
 
 /// Error response for failed pairing attempts
@@ -73,6 +75,8 @@ pub struct PairingManager {
     cert_fingerprint: Option<String>,
     client_id: Option<String>,
     client_secret: Option<String>,
+    /// The working directory where the bridge was started.
+    cwd: String,
     /// Code expiration duration
     expiry_duration: Duration,
     /// Maximum failed attempts before rate limiting
@@ -93,6 +97,7 @@ impl PairingManager {
         cert_fingerprint: Option<String>,
         client_id: Option<String>,
         client_secret: Option<String>,
+        cwd: String,
     ) -> Self {
         let code = generate_pairing_code();
         Self {
@@ -106,6 +111,7 @@ impl PairingManager {
             cert_fingerprint,
             client_id,
             client_secret,
+            cwd,
             expiry_duration: Duration::from_secs(60),
             max_attempts: 5,
             tailscale_path: false,
@@ -207,6 +213,7 @@ impl PairingManager {
             cert_fingerprint: self.cert_fingerprint.clone(),
             client_id: self.client_id.clone(),
             client_secret: self.client_secret.clone(),
+            cwd: self.cwd.clone(),
         })
     }
 
@@ -243,6 +250,7 @@ mod tests {
             Some("SHA256:ABC123".to_string()),
             None,
             None,
+            "/tmp/test".to_string(),
         );
 
         let code = manager.get_code().to_string();
@@ -263,6 +271,7 @@ mod tests {
             None,
             None,
             None,
+            "/tmp/test".to_string(),
         );
 
         let result = manager.validate("000000");
@@ -278,6 +287,7 @@ mod tests {
             None,
             None,
             None,
+            "/tmp/test".to_string(),
         );
 
         let code = manager.get_code().to_string();
@@ -299,6 +309,7 @@ mod tests {
             None,
             None,
             None,
+            "/tmp/test".to_string(),
         );
 
         // Make 5 failed attempts
@@ -320,6 +331,7 @@ mod tests {
             Some("SHA256:ABC123".to_string()),
             None,
             None,
+            "/tmp/test".to_string(),
         );
 
         let url = manager.get_pairing_url("https://192.168.1.100:8080");
@@ -337,6 +349,7 @@ mod tests {
             None,
             None,
             None,
+            "/tmp/test".to_string(),
         ).with_tailscale_path();
 
         let url = manager.get_pairing_url("https://my-laptop.tail1234.ts.net");
@@ -354,6 +367,7 @@ mod tests {
             Some("SHA256:AB:CD:EF".to_string()),
             None,
             None,
+            "/tmp/test".to_string(),
         ).with_tailscale_path();
 
         let url = manager.get_pairing_url("https://100.64.0.1:8080");
