@@ -889,7 +889,7 @@ where
     // Replay buffered messages
     for msg in buffered {
         debug!("📦 Replaying buffered message: {}", msg.chars().take(200).collect::<String>());
-        if let Err(e) = ws_sender.send(Message::Text(msg)).await {
+        if let Err(e) = ws_sender.send(Message::Text(msg.into())).await {
             error!("Failed to replay buffered message: {}", e);
         }
     }
@@ -1062,7 +1062,7 @@ where
                     debug!("📤 Sending to Mobile ({} bytes): {}", line.len(), 
                         line.chars().take(200).collect::<String>());
                     
-                    if let Err(e) = ws_sender.send(Message::Text(line.clone())).await {
+                    if let Err(e) = ws_sender.send(Message::Text(line.clone().into())).await {
                         debug!("Client disconnected, buffering message: {}", e);
                         let mut pool = pool_for_buffer.write().await;
                         pool.buffer_message(&token_for_buffer, line);
@@ -1094,7 +1094,7 @@ where
                     break;
                 }
                 debug!("📶 Sending WebSocket ping to client");
-                if let Err(e) = ws_sender.send(Message::Ping(vec![])).await {
+                if let Err(e) = ws_sender.send(Message::Ping(vec![].into())).await {
                     debug!("Ping send failed (client disconnected): {}", e);
                     break;
                 }
@@ -1232,7 +1232,7 @@ where
                     }
                 });
                 let resp_str = serde_json::to_string(&init_response).unwrap_or_default();
-                if let Err(e) = ws_sender.send(Message::Text(resp_str)).await {
+                if let Err(e) = ws_sender.send(Message::Text(resp_str.into())).await {
                     error!("Failed to send synthetic initialize response: {}", e);
                     return false;
                 }
@@ -1276,7 +1276,7 @@ where
     debug!("🔄 Sending cached session response ({} bytes): {}", response_str.len(),
         response_str.chars().take(200).collect::<String>());
     
-    if let Err(e) = ws_sender.send(Message::Text(response_str)).await {
+    if let Err(e) = ws_sender.send(Message::Text(response_str.into())).await {
         error!("Failed to send cached session response: {}", e);
         return false;
     }
@@ -1339,7 +1339,7 @@ where
     let response_str = serde_json::to_string(&cached).unwrap_or_default();
     debug!("🔄 Sending cached initialize response ({} bytes)", response_str.len());
     
-    if let Err(e) = ws_sender.send(Message::Text(response_str)).await {
+    if let Err(e) = ws_sender.send(Message::Text(response_str.into())).await {
         error!("Failed to send cached initialize response: {}", e);
         return false;
     }
@@ -1390,7 +1390,7 @@ where
         while let Some(msg_result) = ws_receiver.next().await {
             match msg_result {
                 Ok(msg) if msg.is_text() || msg.is_binary() => {
-                    let mut data = msg.into_data();
+                    let mut data = msg.into_data().to_vec();
                     data.push(b'\n');
                     debug!("📥 WS→agent ({} bytes)", data.len());
                     if stdin_tx.send(data).await.is_err() {
@@ -1423,7 +1423,7 @@ where
                         Some(bytes) => {
                             let line = String::from_utf8_lossy(&bytes).trim_end_matches('\n').to_string();
                             debug!("📤 agent→WS ({} bytes)", line.len());
-                            if let Err(e) = ws_sender.send(Message::Text(line)).await {
+                            if let Err(e) = ws_sender.send(Message::Text(line.into())).await {
                                 let msg = e.to_string();
                                 if msg.contains("Sending after closing") || msg.contains("connection closed") {
                                     debug!("WebSocket closed before message could be sent (client disconnected)");
@@ -1555,7 +1555,7 @@ where
             info!("📤 Agent -> Mobile ({} bytes): {}", line.len(),
                 line.chars().take(200).collect::<String>());
 
-            if let Err(e) = ws_sender.send(Message::Text(line)).await {
+            if let Err(e) = ws_sender.send(Message::Text(line.into())).await {
                 let msg = e.to_string();
                 if msg.contains("Sending after closing") || msg.contains("connection closed") {
                     debug!("WebSocket closed before message could be sent (client disconnected)");

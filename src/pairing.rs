@@ -1,4 +1,3 @@
-use rand::Rng;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -220,8 +219,7 @@ impl PairingManager {
 
 /// Generate a cryptographically random 6-digit pairing code
 fn generate_pairing_code() -> String {
-    let mut rng = rand::thread_rng();
-    let code: u32 = rng.gen_range(100000..1000000);
+    let code: u32 = rand::random_range(100000..1000000);
     code.to_string()
 }
 

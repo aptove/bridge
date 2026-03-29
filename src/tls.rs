@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rcgen::{Certificate, CertificateParams, DnType, SanType};
+use rcgen::{CertificateParams, DnType, KeyPair, SanType};
 use sha2::{Sha256, Digest};
 use std::fs;
 use std::net::IpAddr;
@@ -120,13 +120,14 @@ impl TlsConfig {
         params.not_before = time::OffsetDateTime::now_utc();
         params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(365);
 
-        // Generate self-signed certificate (key pair is auto-generated)
-        let cert = Certificate::from_params(params)
+        // Generate self-signed certificate
+        let key_pair = KeyPair::generate()
+            .context("Failed to generate key pair")?;
+        let cert = params.self_signed(&key_pair)
             .context("Failed to generate self-signed certificate")?;
 
-        let cert_pem = cert.serialize_pem()
-            .context("Failed to serialize certificate to PEM")?;
-        let key_pem = cert.serialize_private_key_pem();
+        let cert_pem = cert.pem();
+        let key_pem = key_pair.serialize_pem();
 
         // Ensure the directory exists before writing
         if let Some(parent) = cert_path.parent() {
