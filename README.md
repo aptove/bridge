@@ -265,6 +265,20 @@ bridge status
 echo '{"jsonrpc":"2.0","method":"initialize","id":1}' | gemini --experimental-acp
 ```
 
+### Testing with ACP-Compatible Agents
+
+#### GitHub Copilot
+
+```bash
+bridge run --agent-command "copilot --acp" --qr --verbose
+```
+
+#### Goose
+
+```bash
+bridge run --agent-command "goose acp" --qr --verbose
+```
+
 ---
 
 ## Security
