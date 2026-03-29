@@ -12,8 +12,6 @@ A bridge library and application between Agent Client Protocol (ACP) agents and 
 - **Standalone binary** — run `bridge` as a separate process that spawns your ACP agent over stdio and exposes it over WebSocket to mobile or desktop clients.
 - **Embedded library** — add `aptove-bridge` as a Rust dependency and run the bridge server in-process alongside your agent, with no subprocess or stdio pipe required.
 
-The [Aptove](https://github.com/aptove/aptove) project is the reference implementation of the embedded library usage — `aptove run` starts both the ACP agent and bridge server in a single process.
-
 ## Transport Modes
 
 | Mode | Use Case | Documentation |
@@ -52,8 +50,7 @@ use aptove_bridge::{BridgeServer, BridgeServeConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Build from defaults — reads transport selection from common.toml
-    // in ~/Library/Application Support/Aptove (macOS) or ~/.config/Aptove (Linux).
+    // Build from defaults — reads transport selection from common.toml.
     // Prompts the user to select a transport if multiple are enabled.
     let mut server = BridgeServer::build(&BridgeServeConfig::default())?;
 
@@ -92,15 +89,6 @@ Load from disk (reads `bridge.toml` and `common.toml`, generates `agent_id` if a
 let config = BridgeServeConfig::load()?;
 ```
 
-### Reference Implementation: Aptove
-
-The [Aptove project](https://github.com/aptove/aptove) (`aptove run`) is the full reference implementation. Key patterns it uses:
-
-- `BridgeServer::build_with_trigger_store()` — wires in a `TriggerStore` for webhook support
-- `server.show_qr()` — uses the pairing handshake so clients deduplicate agents by `agentId`
-- `server.take_transport()` + `run_message_loop()` — connects the in-process transport to the ACP dispatch loop
-- `tokio::select!` on `agent_loop` and `server.start()` — clean shutdown when either side exits
-
 ---
 
 ## Standalone Binary
@@ -117,7 +105,7 @@ cargo build --release
   --qr
 ```
 
-Scan the QR code with the Aptove mobile app to connect.
+Scan the QR code with the mobile app to connect.
 
 ### Configuration — `common.toml`
 
@@ -125,12 +113,10 @@ All transport settings live in `common.toml`. The file is created automatically 
 
 **Default location:**
 
-| Runtime | macOS | Linux |
-|---------|-------|-------|
-| `aptove run` (embedded) | `~/Library/Application Support/Aptove/common.toml` | `~/.config/Aptove/common.toml` |
-| `bridge` (standalone) | `~/Library/Application Support/com.aptove.bridge/common.toml` | `~/.config/bridge/common.toml` |
-
-When using `aptove run`, this config is shared across all workspaces.
+| Platform | Path |
+|----------|------|
+| macOS | `~/Library/Application Support/com.aptove.bridge/common.toml` |
+| Linux | `~/.config/bridge/common.toml` |
 
 Override with `--config-dir`:
 ```bash
@@ -196,7 +182,7 @@ Displays the connection QR code for the currently active transport. The bridge m
 To show the QR at initial startup, pass `--qr` to `bridge run` instead:
 
 ```bash
-bridge run --agent-command "aptove stdio" --qr
+bridge run --agent-command "<your-agent-command>" --qr
 ```
 
 #### `setup` — Provision Cloudflare infrastructure
@@ -217,7 +203,7 @@ Creates the Cloudflare tunnel, DNS record, Access Application, and Service Token
 | `--account-id <ID>` | Cloudflare account ID | Required |
 | `--domain <DOMAIN>` | Domain managed by Cloudflare | Required |
 | `--subdomain <SUB>` | Subdomain for the bridge endpoint | `agent` |
-| `--tunnel-name <NAME>` | Name for the Cloudflare tunnel | `aptove-tunnel` |
+| `--tunnel-name <NAME>` | Name for the Cloudflare tunnel | `bridge-tunnel` |
 
 #### `status` — Check configuration
 
@@ -291,15 +277,12 @@ echo '{"jsonrpc":"2.0","method":"initialize","id":1}' | gemini --experimental-ac
 To rotate credentials (invalidates all paired devices):
 
 ```bash
-# Using aptove run (embedded bridge):
-rm ~/Library/Application\ Support/Aptove/common.toml   # macOS
-rm ~/.config/Aptove/common.toml                        # Linux
-aptove run --qr
+# macOS
+rm ~/Library/Application\ Support/com.aptove.bridge/common.toml
+# Linux
+rm ~/.config/bridge/common.toml
 
-# Using standalone bridge binary:
-rm ~/Library/Application\ Support/com.aptove.bridge/common.toml   # macOS
-rm ~/.config/bridge/common.toml                                    # Linux
-bridge run --agent-command "aptove stdio" --qr
+bridge run --agent-command "<your-agent-command>" --qr
 ```
 
 ---
