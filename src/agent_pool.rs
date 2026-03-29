@@ -181,8 +181,11 @@ impl AgentPool {
         let command = parts[0];
         let args = &parts[1..];
 
+        let cwd = std::env::current_dir()
+            .context("Failed to determine current working directory")?;
         let mut child = Command::new(command)
             .args(args)
+            .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
