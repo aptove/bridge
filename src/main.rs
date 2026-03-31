@@ -718,33 +718,6 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Also check old BridgeConfig (Cloudflare)
-            match BridgeConfig::load() {
-                Ok(config) => {
-                    println!("\n✅ Legacy Cloudflare config found");
-                    println!("Hostname: {}", config.hostname);
-                    println!("Tunnel ID: {}", if config.tunnel_id.is_empty() {
-                        "⚠️  Not configured".to_string()
-                    } else {
-                        config.tunnel_id.clone()
-                    });
-
-                    match cloudflared_config_path() {
-                        Ok(path) => {
-                            if path.exists() {
-                                println!("cloudflared config: ✅ {}", path.display());
-                            } else {
-                                println!("cloudflared config: ⚠️  Not found at {}", path.display());
-                            }
-                        }
-                        Err(e) => println!("cloudflared config: ❌ Cannot determine path: {}", e),
-                    }
-                }
-                Err(_) => {
-                    println!("\nℹ️  No legacy Cloudflare config (config.json) — using common.toml.");
-                }
-            }
-
             // Check Tailscale status
             if is_tailscale_available() {
                 match get_tailscale_ipv4() {
