@@ -15,13 +15,14 @@ use bridge::tailscale::{is_tailscale_available, is_tailscale_installed, get_tail
 #[derive(Parser)]
 #[command(name = "bridge", version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Bridge stdio-based ACP agents to mobile apps", long_about = None)]
+#[command(subcommand_required = false)]
 struct Cli {
     /// Custom configuration directory (default: system config location)
     #[arg(long, global = true)]
     config_dir: Option<std::path::PathBuf>,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -51,9 +52,10 @@ enum Commands {
 
     /// Run the bridge server (reads transport config from common.toml)
     Run {
-        /// Command to run the ACP agent (e.g., "copilot --acp")
+        /// Command to run the ACP agent (e.g., "copilot --acp").
+        /// If omitted, an interactive menu lets you pick a known agent.
         #[arg(short, long)]
-        agent_command: String,
+        agent_command: Option<String>,
 
         /// Address to bind the WebSocket server
         #[arg(short, long, default_value = "0.0.0.0")]
@@ -432,6 +434,42 @@ fn show_static_qr(
     Ok(())
 }
 
+fn prompt_agent_command() -> Result<String> {
+    use std::io::Write as _;
+
+    const AGENTS: &[(&str, &str)] = &[
+        ("Copilot", "copilot --acp"),
+        ("Gemini", "gemini --experimental-acp"),
+        ("Goose", "goose acp"),
+    ];
+
+    println!("\nSelect an agent to run:");
+    for (i, (name, cmd)) in AGENTS.iter().enumerate() {
+        println!("  [{}] {}  ({})", i + 1, name, cmd);
+    }
+    println!("  [{}] Custom", AGENTS.len() + 1);
+    print!("Enter number [1]: ");
+    std::io::stdout().flush()?;
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let choice: usize = input.trim().parse().unwrap_or(1);
+
+    if choice >= 1 && choice <= AGENTS.len() {
+        Ok(AGENTS[choice - 1].1.to_string())
+    } else {
+        print!("Enter agent command: ");
+        std::io::stdout().flush()?;
+        let mut cmd = String::new();
+        std::io::stdin().read_line(&mut cmd)?;
+        let cmd = cmd.trim().to_string();
+        if cmd.is_empty() {
+            anyhow::bail!("No agent command provided");
+        }
+        Ok(cmd)
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -442,8 +480,15 @@ async fn main() -> Result<()> {
         common_config::set_config_dir(dir.clone());
     }
 
+    let command = cli.command.unwrap_or(Commands::Run {
+        agent_command: None,
+        bind: "0.0.0.0".to_string(),
+        advertise_addr: None,
+        verbose: false,
+    });
+
     // Determine log level based on command and flags
-    let log_level = match &cli.command {
+    let log_level = match &command {
         Commands::Run { verbose, .. } => {
             if *verbose { "info" } else { "warn" }
         }
@@ -457,7 +502,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    match cli.command {
+    match command {
         Commands::Setup {
             api_token,
             account_id,
@@ -528,6 +573,11 @@ async fn main() -> Result<()> {
         }
 
         Commands::Run { agent_command, bind, advertise_addr, verbose: _ } => {
+            let agent_command = match agent_command {
+                Some(cmd) => cmd,
+                None => prompt_agent_command()?,
+            };
+
             info!("🌉 Starting ACP Bridge v{}", env!("CARGO_PKG_VERSION"));
 
             // Load (or initialise) the common config
