@@ -63,7 +63,7 @@ port    = 8765
 ## Starting the Bridge
 
 ```bash
-bridge run --agent-command "copilot --acp" --qr
+bridge
 ```
 
 That's all. Transport mode is read from `common.toml` — no extra flags needed.

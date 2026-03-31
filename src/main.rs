@@ -573,7 +573,7 @@ async fn main() -> Result<()> {
             let json = config.to_connection_json()?;
             qr::display_qr_code(&json, "cloudflare")?;
             println!("\n⚠️  Important: Keep your configuration file secure. It contains sensitive credentials.");
-            println!("\n🚀 Start the bridge with: bridge run --agent-command \"copilot --acp\"");
+            println!("\n🚀 Start the bridge with: bridge");
         }
 
         Commands::Run { agent_command, bind, advertise_addr, verbose: _ } => {
@@ -691,7 +691,7 @@ async fn main() -> Result<()> {
                     println!("Bridge is not running.");
                     println!();
                     println!("Start it first, then run 'bridge show-qr' to display the connection QR:");
-                    println!("  bridge run --agent-command \"<your-command>\"");
+                    println!("  bridge");
                 }
             }
         }

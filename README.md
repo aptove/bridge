@@ -99,10 +99,14 @@ let config = BridgeServeConfig::load()?;
 # Build
 cargo build --release
 
-# Start with local transport (default — no config needed)
-./target/release/bridge run \
-  --agent-command "copilot --acp"
+# Start the bridge — interactive agent selection menu
+./target/release/bridge
+
+# Or specify the agent directly
+./target/release/bridge run --agent-command "copilot --acp"
 ```
+
+Running `bridge` with no subcommand defaults to `run`. When `--agent-command` is omitted, an interactive menu lets you pick from known agents (Copilot, Gemini, Goose) or enter a custom command.
 
 Scan the QR code with the mobile app to connect.
 
@@ -117,9 +121,9 @@ All transport settings live in `common.toml`. The file is created automatically 
 | macOS | `~/Library/Application Support/com.aptove.bridge/common.toml` |
 | Linux | `~/.config/bridge/common.toml` |
 
-Override with `--config-dir`:
+Override with `-c` / `--config-dir`:
 ```bash
-bridge --config-dir ./my-config run --agent-command "copilot --acp"
+bridge -c ./my-config run --agent-command "copilot --acp"
 ```
 
 #### Example `common.toml`
@@ -155,17 +159,35 @@ Enable only the transports you need. `agent_id` and `auth_token` are generated a
 
 ### Commands
 
-#### `run` — Start the bridge
+#### `run` — Start the bridge (default)
+
+`run` is the default subcommand — running `bridge` with no arguments is equivalent to `bridge run`.
 
 ```bash
-bridge run --agent-command "<your-agent-command>"
+# Interactive agent selection
+bridge
+
+# Or specify the agent directly
+bridge run --agent-command "copilot --acp"
 ```
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--agent-command <CMD>` | Command to spawn the ACP agent | Required |
-| `--bind <ADDR>` | Address to bind the listener | `0.0.0.0` |
-| `--verbose` | Enable info-level logging | Off (warn only) |
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--agent-command <CMD>` | `-a` | Command to spawn the ACP agent | Interactive menu |
+| `--bind <ADDR>` | `-b` | Address to bind the listener | `0.0.0.0` |
+| `--verbose` | | Enable info-level logging | Off (warn only) |
+| `--advertise-addr <ADDR>` | | Override LAN address in QR pairing URL | Auto-detected |
+
+When `--agent-command` is omitted, the bridge presents an interactive menu:
+
+```
+Select an agent to run:
+  [1] Copilot  (copilot --acp)
+  [2] Gemini   (gemini --experimental-acp)
+  [3] Goose    (goose acp)
+  [4] Custom
+Enter number [1]:
+```
 
 The QR code for pairing is always displayed at startup.
 
@@ -250,7 +272,7 @@ No subprocess is spawned. Agent and bridge communicate via in-process channels.
 
 ```bash
 # Enable verbose logging
-bridge run --agent-command "copilot --acp" --verbose
+bridge run --verbose
 
 # Check which transports are configured
 bridge status
@@ -261,18 +283,13 @@ echo '{"jsonrpc":"2.0","method":"initialize","id":1}' | copilot --acp
 
 ### Testing with Other ACP-Compatible Agents
 
-Please note that the project is extensively tested only with Copilot CLI. Open a bug report if you notice any issues with other ACP-Compatible Agents
+Please note that the project is extensively tested only with Copilot CLI. Open a bug report if you notice any issues with other ACP-Compatible Agents.
 
-#### Gemini CLI
-
-```bash
-bridge run --agent-command "gemini --experimental-acp" --verbose
-```
-
-#### Goose
+The easiest way to test any supported agent is to run `bridge` and pick it from the interactive menu. Alternatively, pass the command directly:
 
 ```bash
-bridge run --agent-command "goose acp" --verbose
+bridge run -a "gemini --experimental-acp" --verbose
+bridge run -a "goose acp" --verbose
 ```
 
 ---
@@ -292,7 +309,7 @@ rm ~/Library/Application\ Support/com.aptove.bridge/common.toml
 # Linux
 rm ~/.config/bridge/common.toml
 
-bridge run --agent-command "<your-agent-command>"
+bridge
 ```
 
 ---

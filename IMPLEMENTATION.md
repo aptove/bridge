@@ -78,7 +78,7 @@ This command:
 ### Runtime Flow
 
 ```bash
-bridge run --agent-command "copilot --acp"
+bridge
 ```
 
 This command:
@@ -178,8 +178,7 @@ Works perfectly on Cloudflare's free Zero Trust tier:
 
 5. **Start bridge**:
    ```bash
-   ./target/release/bridge run \
-     --agent-command "copilot --acp"
+   ./target/release/bridge
    ```
 
 ### To Integrate with Your Swift App:

@@ -107,29 +107,26 @@ This is useful for agents that send asynchronous notifications or continue proce
 
 ```bash
 # Basic session persistence (30-minute timeout)
-./target/release/bridge start \
-  --agent-command "copilot --acp" \
+./target/release/bridge run \
+  -a "copilot --acp" \
   --port 8080 \
   --stdio-proxy \
-  --qr \
   --keep-alive
 
 # Extended timeout with message buffering
-./target/release/bridge start \
-  --agent-command "copilot --acp" \
+./target/release/bridge run \
+  -a "copilot --acp" \
   --port 8080 \
   --stdio-proxy \
-  --qr \
   --keep-alive \
   --session-timeout 3600 \
   --buffer-messages
 
 # High-capacity server
-./target/release/bridge start \
-  --agent-command "copilot --acp" \
+./target/release/bridge run \
+  -a "copilot --acp" \
   --port 8080 \
   --stdio-proxy \
-  --qr \
   --keep-alive \
   --max-agents 50 \
   --session-timeout 7200
@@ -203,9 +200,9 @@ Each agent runs as a separate OS process with its own stdin/stdout pipes. There 
 
 ```bash
 # Enable verbose logging to see pool activity
-./target/release/bridge start \
-  --agent-command "copilot --acp" \
-  --stdio-proxy --qr --keep-alive --verbose
+./target/release/bridge run \
+  -a "copilot --acp" \
+  --stdio-proxy --keep-alive --verbose
 
 # Watch for these log messages:
 # "Reusing existing agent for token: abc..."  → successful reconnect

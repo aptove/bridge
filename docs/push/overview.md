@@ -206,10 +206,9 @@ The mobile app uses:
 
 ```bash
 bridge run \
-  --agent-command "copilot --acp" \
+  -a "copilot --acp" \
   --port 3001 \
   --stdio-proxy \
-  --qr \
   --push-relay-url https://push.aptove.com
 ```
 
@@ -407,10 +406,9 @@ Content-Type: application/json
 cd bridge
 cargo build --release
 ./target/release/bridge run \
-  --agent-command "copilot --acp" \
+  -a "copilot --acp" \
   --port 3001 \
   --stdio-proxy \
-  --qr \
   --push-relay-url https://push.aptove.com \
   --verbose
 ```

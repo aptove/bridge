@@ -22,12 +22,10 @@ cargo build --release
 No configuration needed. On first run, `common.toml` is created automatically with local transport enabled.
 
 ```bash
-bridge run \
-  --agent-command "copilot --acp" \
-  --qr
+bridge
 ```
 
-Scan the QR code with the Aptove app.
+The interactive menu lets you pick an agent (Copilot, Gemini, Goose, or a custom command). Scan the QR code with the Aptove app.
 
 ---
 
@@ -71,7 +69,7 @@ client_secret = "xxxxx"
 ### 3. Start
 
 ```bash
-bridge run --agent-command "copilot --acp" --qr
+bridge
 ```
 
 ---
@@ -93,7 +91,7 @@ tls     = true
 Then start normally:
 
 ```bash
-bridge run --agent-command "copilot --acp" --qr
+bridge
 ```
 
 ---
@@ -116,7 +114,7 @@ enabled = true
 ```
 
 ```bash
-bridge run --agent-command "copilot --acp" --qr
+bridge
 ```
 
 All enabled transports start concurrently. The mobile app tries them in priority order (tailscale-serve → tailscale-ip → cloudflare → local) and connects via the first that succeeds.
@@ -132,12 +130,6 @@ bridge show-qr
 ```
 
 Displays the connection QR for the currently active transport. **The bridge must already be running.** Use this to pair an additional device without restarting.
-
-To show the QR at initial startup, pass `--qr` to `bridge run`:
-
-```bash
-bridge run --agent-command "aptove stdio" --qr
-```
 
 ### Check Configuration Status
 
@@ -187,10 +179,10 @@ All settings live in one file. The path depends on how you run the bridge:
 
 When using `aptove run`, the config is shared across all workspaces.
 
-Override with `--config-dir`:
+Override with `-c` / `--config-dir`:
 
 ```bash
-bridge --config-dir ./my-config start --agent-command "copilot --acp"
+bridge -c ./my-config run -a "copilot --acp"
 ```
 
 ### Rotating Credentials
@@ -201,12 +193,12 @@ To generate a new `agent_id`, `auth_token`, and TLS certificate (invalidates all
 # Using aptove run (embedded bridge):
 rm ~/Library/Application\ Support/Aptove/common.toml   # macOS
 rm ~/.config/Aptove/common.toml                        # Linux
-aptove run --qr
+aptove run
 
 # Using standalone bridge binary:
 rm ~/Library/Application\ Support/com.aptove.bridge/common.toml   # macOS
 rm ~/.config/bridge/common.toml                                    # Linux
-bridge run --agent-command "aptove stdio" --qr
+bridge
 ```
 
 ---
@@ -242,16 +234,16 @@ bridge run --agent-command "aptove stdio" --qr
 
 | Command | Purpose |
 |---------|---------|
-| `bridge run --agent-command <CMD>` | Run the bridge (reads transport config from `common.toml`) |
+| `bridge` | Run the bridge with interactive agent selection (default) |
+| `bridge run -a <CMD>` | Run the bridge with a specific agent command |
 | `bridge show-qr` | Show QR / start offline registration |
 | `bridge status` | Show configuration and transport status |
 | `bridge setup ...` | Provision Cloudflare infrastructure (one-time) |
 
-## Start Flags
+## Run Flags
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--agent-command <CMD>` | Command to spawn the ACP agent | Required |
-| `--bind <ADDR>` | Bind address for all listeners | `0.0.0.0` |
-| `--qr` | Display QR code(s) at startup | Off |
-| `--verbose` | Info-level logging | Off |
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--agent-command <CMD>` | `-a` | Command to spawn the ACP agent | Interactive menu |
+| `--bind <ADDR>` | `-b` | Bind address for all listeners | `0.0.0.0` |
+| `--verbose` | | Info-level logging | Off |

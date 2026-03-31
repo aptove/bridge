@@ -90,7 +90,7 @@ client_secret = "xxxxx"
 ## Starting the Bridge
 
 ```bash
-bridge run --agent-command "copilot --acp" --qr
+bridge
 ```
 
 Transport selection is read from `common.toml` — no `--cloudflare` flag is needed. The bridge:
@@ -99,7 +99,7 @@ Transport selection is read from `common.toml` — no `--cloudflare` flag is nee
 2. Checks Service Token expiry and auto-rotates if within 30 days
 3. Launches `cloudflared tunnel run` as a managed child process
 4. Waits up to 30 seconds for the tunnel to become active
-5. Shows a QR code (if `--qr` is passed)
+5. Shows a QR code for pairing
 
 ---
 

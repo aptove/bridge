@@ -40,20 +40,25 @@ tls     = true    # default: true
 ## Starting the Bridge
 
 ```bash
-bridge run --agent-command "aptove" --qr
+# Interactive agent selection
+bridge
+
+# Or specify the agent directly
+bridge run -a "copilot --acp"
 ```
+
+Running `bridge` with no subcommand defaults to `run`. When `--agent-command` is omitted, an interactive menu lets you pick a known agent.
 
 The bridge reads port, TLS, and auth token settings from `common.toml` — no flags needed for those.
 
 **Available `run` flags:**
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--agent-command <CMD>` | Command to spawn the ACP agent | Required |
-| `--bind <ADDR>` | Bind address for the WebSocket server | `0.0.0.0` |
-| `--advertise-addr <IP>` | IP or hostname advertised in the QR code and embedded in the TLS cert SANs. Required when the bridge's local IP differs from the address reachable by clients (e.g. inside a container). | Auto-detected |
-| `--qr` | Display QR code for mobile pairing | Off |
-| `--verbose` | Enable info-level logging | Off |
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--agent-command <CMD>` | `-a` | Command to spawn the ACP agent | Interactive menu |
+| `--bind <ADDR>` | `-b` | Bind address for the WebSocket server | `0.0.0.0` |
+| `--advertise-addr <IP>` | | IP or hostname advertised in the QR code and embedded in the TLS cert SANs. Required when the bridge's local IP differs from the address reachable by clients (e.g. inside a container). | Auto-detected |
+| `--verbose` | | Enable info-level logging | Off |
 
 ---
 
@@ -69,13 +74,13 @@ certificate's Subject Alternative Names (SANs) so mobile clients can connect:
 docker run -p 8765:8765 \
   -v "$HOME/Library/Application Support/com.aptove.bridge":/root/.config/bridge \
   aptove/bridge \
-  run --agent-command "aptove" --advertise-addr 192.168.1.50 --qr
+  run -a "copilot --acp" --advertise-addr 192.168.1.50
 
 # Apple Native container (macOS)
 container run -p 8765:8765 \
   -v "$HOME/Library/Application Support/com.aptove.bridge":/root/.config/bridge \
   aptove/bridge \
-  run --agent-command "aptove" --advertise-addr 192.168.1.50 --qr
+  run -a "copilot --acp" --advertise-addr 192.168.1.50
 ```
 
 > **Important:** If you add `--advertise-addr` for the first time (or change the
@@ -238,7 +243,7 @@ rm ~/Library/Application\ Support/com.aptove.bridge/cert.pem \
 rm ~/.config/bridge/cert.pem ~/.config/bridge/key.pem ~/.config/bridge/common.toml
 ```
 
-Then re-run `bridge run --agent-command "..." --qr`.
+Then re-run `bridge`.
 
 ---
 
@@ -259,7 +264,7 @@ curl -k "https://192.168.1.100:8765/pair/local?code=847291"
 - Verify the bridge is binding to the right interface (`--bind 0.0.0.0` by default)
 
 ### "Invalid code"
-- Codes expire after 60 seconds — restart `bridge run --qr` to get a fresh code
+- Codes expire after 60 seconds — restart `bridge` to get a fresh code
 - Codes are single-use — scan only once
 - Check for typos if entering the code manually
 
