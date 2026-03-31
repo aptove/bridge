@@ -15,10 +15,14 @@ use bridge::tailscale::{is_tailscale_available, is_tailscale_installed, get_tail
 #[derive(Parser)]
 #[command(name = "bridge", version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Bridge stdio-based ACP agents to mobile apps", long_about = None)]
-#[command(subcommand_required = false)]
+#[command(subcommand_required = false, disable_version_flag = true)]
 struct Cli {
+    /// Print version
+    #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
+    version: (),
+
     /// Custom configuration directory (default: system config location)
-    #[arg(long, global = true)]
+    #[arg(short = 'c', long, global = true)]
     config_dir: Option<std::path::PathBuf>,
 
     #[command(subcommand)]
