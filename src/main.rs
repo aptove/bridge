@@ -511,6 +511,51 @@ fn show_static_qr(
     Ok(())
 }
 
+/// Validate that the agent command binary exists and is executable before starting the bridge.
+/// Provides a clear error at startup rather than a cryptic failure when the first client connects.
+fn validate_agent_command(command: &str) -> Result<()> {
+    let binary = command
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Agent command is empty"))?;
+
+    let binary_path = std::path::Path::new(binary);
+
+    if binary_path.is_absolute() || binary.contains('/') {
+        // Explicit path — check it directly without PATH lookup
+        anyhow::ensure!(
+            binary_path.exists(),
+            "Agent binary not found: {}",
+            binary
+        );
+        anyhow::ensure!(
+            binary_path.is_file(),
+            "Agent path is not a regular file: {}",
+            binary
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(binary_path)?.permissions().mode();
+            anyhow::ensure!(
+                mode & 0o111 != 0,
+                "Agent binary is not executable: {}",
+                binary
+            );
+        }
+    } else {
+        // Bare name — resolve against PATH
+        which::which(binary).with_context(|| {
+            format!(
+                "Agent binary '{}' not found in PATH. Is it installed and on your PATH?",
+                binary
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
 fn prompt_agent_command() -> Result<String> {
     use std::io::Write as _;
 
@@ -769,6 +814,8 @@ async fn main() -> Result<()> {
                 Some(cmd) => cmd,
                 None => prompt_agent_command()?,
             };
+
+            validate_agent_command(&agent_command)?;
 
             info!("🌉 Starting ACP Bridge v{}", env!("CARGO_PKG_VERSION"));
 

@@ -306,6 +306,7 @@ bridge run -a "goose acp" --verbose
 - **TLS**: self-signed certificate generated on first run. Certificate fingerprint is included in the QR pairing payload and pinned by the mobile app to prevent MITM attacks.
 - **Pairing codes**: 6-digit, single-use, expire after 60 seconds. Rate-limited to 5 attempts per code.
 - **`common.toml`**: contains all secrets. Permissions are set to `0600` automatically. Keep it secure.
+- **Agent command**: the `--agent-command` value (or interactive menu selection) is validated at startup — the binary must exist and be executable before the server accepts connections. The command is never persisted to `common.toml`; it must be supplied each time the bridge is started. The bridge is an operator tool: whoever can invoke it already has local shell access, so the agent command is implicitly trusted to the same degree as any other command that user could run.
 
 To rotate credentials (invalidates all paired devices):
 
