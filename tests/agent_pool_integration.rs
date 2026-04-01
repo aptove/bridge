@@ -205,12 +205,6 @@ async fn max_agents_evicts_oldest_idle() {
     pool.shutdown_all().await;
 }
 
-// ── 9.5  Backward compatibility (no --keep-alive) ───────────────────────
-//
-// When no pool is configured, the bridge should use legacy mode where the
-// agent process is killed on disconnect (`kill_on_drop(true)`). We verify
-// that the pool is optional and default construction works.
-
 #[tokio::test]
 async fn pool_is_optional_default_construction() {
     // Simulates the bridge path where `agent_pool` is `None`.
