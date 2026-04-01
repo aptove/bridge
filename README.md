@@ -30,7 +30,7 @@ One transport is active at a time. When multiple are enabled in `common.toml`, t
 - ⚡ **WebSocket Streaming**: Real-time bidirectional communication
 - 🌐 **Multi-Transport**: Local, Cloudflare, Tailscale — configure and switch between them
 - 🔑 **Stable Agent Identity**: `agent_id` UUID persisted in `common.toml` for multi-transport dedup on mobile
-- 🦀 **Embeddable**: Use as a library with `BridgeServer` for in-process deployment
+- 🦀 **Embeddable**: Use as a library with `StdioBridge` for in-process deployment
 
 ---
 
@@ -46,48 +46,46 @@ aptove-bridge = "0.1"
 ### Minimal Example
 
 ```rust
-use aptove_bridge::{BridgeServer, BridgeServeConfig};
+use aptove_bridge::{
+    bridge::StdioBridge,
+    common_config::CommonConfig,
+    tls::TlsConfig,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Build from defaults — reads transport selection from common.toml.
-    // Prompts the user to select a transport if multiple are enabled.
-    let mut server = BridgeServer::build(&BridgeServeConfig::default())?;
+    // Load (or initialise) shared config — generates agent_id and auth_token on first run
+    let mut config = CommonConfig::load()?;
+    config.ensure_agent_id();
+    config.ensure_auth_token();
+    config.save()?;
 
-    // Display a pairing QR code so a client can connect
-    server.show_qr()?;
+    // Generate (or load) a self-signed TLS cert
+    let tls = TlsConfig::load_or_generate(&CommonConfig::config_dir(), &[])?;
 
-    // Take the in-process transport — wire it to your agent message loop
-    let mut transport = server.take_transport();
-
-    // Run your agent loop and bridge listener concurrently
-    tokio::select! {
-        _ = my_agent_loop(&mut transport) => {}
-        res = server.start() => { res?; }
-    }
-
-    Ok(())
+    StdioBridge::new("copilot --acp".to_string(), 8765)
+        .with_auth_token(Some(config.auth_token.clone()))
+        .with_tls(tls)
+        .start()
+        .await
 }
 ```
 
-`take_transport()` returns an `InProcessTransport` that implements the same `Transport` trait as `StdioTransport` — your agent message loop works identically whether running standalone or embedded.
+### `StdioBridge` Builder Methods
 
-### `BridgeServeConfig`
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `port` | `8080` | WebSocket listen port (overridden by `common.toml` per-transport config) |
-| `bind_addr` | `"0.0.0.0"` | Bind address |
-| `tls` | `true` | Enable TLS (self-signed cert auto-generated) |
-| `auth_token` | `None` | Bearer token required for connections (auto-loaded from `common.toml`) |
-| `keep_alive` | `false` | Enable keep-alive agent pool |
-| `config_dir` | platform default | Directory for `common.toml`, TLS certs, and credentials |
-
-Load from disk (reads `bridge.toml` and `common.toml`, generates `agent_id` if absent):
-
-```rust
-let config = BridgeServeConfig::load()?;
-```
+| Method | Description |
+|--------|-------------|
+| `new(agent_command, port)` | Create a bridge that spawns the given command; listen on `port` |
+| `.with_bind_addr(addr)` | Override bind address (default: `"0.0.0.0"`) |
+| `.with_auth_token(token)` | Require a bearer token for connections |
+| `.with_tls(tls_config)` | Enable TLS with a `TlsConfig` (self-signed cert) |
+| `.with_external_tls()` | Signal that TLS is handled upstream (Tailscale Serve, Cloudflare) |
+| `.with_pairing(manager)` | Enable QR pairing via a `PairingManager` |
+| `.with_agent_pool(pool)` | Enable keep-alive sessions via an `AgentPool` |
+| `.with_working_dir(dir)` | Set the working directory for the spawned agent process |
+| `.with_push_relay(client)` | Enable push notifications via a relay |
+| `.with_webhook_resolver(fn)` | Handle `POST /webhook/<token>` trigger requests |
+| `.start()` | Start the WebSocket listener (runs until shutdown) |
 
 ---
 
@@ -230,7 +228,7 @@ Creates the Cloudflare tunnel, DNS record, Access Application, and Service Token
 | `--account-id <ID>` | Cloudflare account ID | Required |
 | `--domain <DOMAIN>` | Domain managed by Cloudflare | Required |
 | `--subdomain <SUB>` | Subdomain for the bridge endpoint | `agent` |
-| `--tunnel-name <NAME>` | Name for the Cloudflare tunnel | `bridge-tunnel` |
+| `--tunnel-name <NAME>` | Name for the Cloudflare tunnel | `aptove-tunnel` |
 
 #### `status` — Check configuration
 
@@ -256,16 +254,13 @@ Prints the active `common.toml` path, `agent_id`, enabled transports, and Tailsc
 ### Embedded (library)
 
 ```
-┌─────────────┐                    ┌──────────────────────────────────────────────┐
-│  Client App │◄──────────────────►│  Your process                                │
-│ (iOS/Android│  WebSocket (TLS)   │  ┌─────────────────┐  ┌────────────────────┐ │
-└─────────────┘                    │  │  BridgeServer   │◄►│  Agent message loop│ │
-                                   │  │  (transport)    │  │ (InProcessTransport│ │
-                                   │  └─────────────────┘  └────────────────────┘ │
-                                   └──────────────────────────────────────────────┘
+┌─────────────┐                    ┌──────────────────────────────────┐        ┌──────────────┐
+│  Client App │◄──────────────────►│  Your process                    │◄──────►│  ACP Agent   │
+│ (iOS/Android│  WebSocket (TLS)   │  StdioBridge (transport listener)│  stdio │  (your cmd)  │
+└─────────────┘                    └──────────────────────────────────┘        └──────────────┘
 ```
 
-No subprocess is spawned. Agent and bridge communicate via in-process channels.
+The agent process is still spawned as a subprocess via stdio — `StdioBridge` handles the WebSocket server, TLS, auth, and pairing in-process alongside your application.
 
 ---
 
