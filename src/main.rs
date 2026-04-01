@@ -211,6 +211,78 @@ async fn ensure_cloudflare_config(no_auth: bool) -> Result<BridgeConfig> {
     Ok(cfg)
 }
 
+/// Run interactive Cloudflare Zero Trust setup, returning a ready `TransportConfig`.
+///
+/// Adapted from `ensure_cloudflare_config()` but returns a `TransportConfig` instead of
+/// `BridgeConfig`, suitable for inserting into `CommonConfig.transports`.
+async fn setup_cloudflare_transport() -> Result<TransportConfig> {
+    use std::io::{self, BufRead, Write};
+
+    println!("\n🔧 Cloudflare Zero Trust setup");
+    println!("   (You only need to do this once — credentials are saved to disk.)\n");
+
+    let stdin = io::stdin();
+    let mut lines = stdin.lock().lines();
+
+    let mut prompt = |msg: &str| -> Result<String> {
+        print!("{}", msg);
+        io::stdout().flush()?;
+        Ok(lines.next().context("stdin closed")??.trim().to_string())
+    };
+
+    let api_token = prompt("  Cloudflare API Token (Zones:Edit + Access:*:Edit + Service Tokens:Edit): ")?;
+    let account_id = prompt("  Cloudflare Account ID: ")?;
+    let domain = prompt("  Domain (e.g. example.com): ")?;
+    let subdomain_input = prompt("  Subdomain [agent]: ")?;
+    let subdomain = if subdomain_input.is_empty() { "agent".to_string() } else { subdomain_input };
+    let tunnel_name = format!("{}-tunnel", domain.split('.').next().unwrap_or("bridge"));
+
+    println!();
+    info!("🚀 Running Cloudflare Zero Trust setup...");
+
+    let client = CloudflareClient::new(api_token, account_id.clone());
+    let hostname = format!("{}.{}", subdomain, domain);
+
+    info!("📡 Creating tunnel: {}", tunnel_name);
+    let tunnel = client.create_or_get_tunnel(&tunnel_name).await?;
+    info!("✅ Tunnel: {}", tunnel.id);
+
+    info!("🌐 Configuring DNS record for {}", hostname);
+    client.create_dns_record(&domain, &subdomain, &tunnel.id).await?;
+    info!("✅ DNS record ready");
+
+    info!("🔐 Creating Access Application...");
+    let _app = client.create_access_application(&hostname).await?;
+    info!("✅ Access Application ready");
+
+    info!("🎫 Generating Service Token...");
+    let service_token = client.create_service_token(&hostname).await?;
+    info!("✅ Service Token created");
+
+    info!("⚙️  Configuring tunnel ingress...");
+    client.configure_tunnel_ingress(&tunnel.id, &hostname, 8080).await?;
+    info!("✅ Tunnel ingress configured");
+
+    let credentials_path = write_credentials_file(&account_id, &tunnel.id, &tunnel.secret)?;
+    write_cloudflared_config(&tunnel.id, &credentials_path, &hostname, 8080)?;
+
+    info!("✅ Cloudflare setup complete for {}", hostname);
+
+    Ok(TransportConfig {
+        enabled: true,
+        port: Some(8080),
+        tls: None,
+        hostname: Some(format!("https://{}", hostname)),
+        tunnel_id: Some(tunnel.id),
+        tunnel_secret: Some(tunnel.secret),
+        account_id: Some(account_id),
+        client_id: Some(service_token.client_id),
+        client_secret: Some(service_token.client_secret),
+        domain: Some(domain),
+        subdomain: Some(subdomain),
+    })
+}
+
 /// Build a `PairingManager` and optionally a `TlsConfig` for a single transport.
 ///
 /// Returns `(hostname, pairing_manager, tls_config, extra_guards)` where
@@ -474,6 +546,121 @@ fn prompt_agent_command() -> Result<String> {
     }
 }
 
+/// Interactively select a transport, auto-configuring or running inline setup if needed.
+///
+/// Always shows all four transport options with a status indicator. If the chosen
+/// transport is not yet configured in `config.transports`, it is created on the fly
+/// and `config` is mutated + saved.
+async fn prompt_transport_selection(config: &mut CommonConfig) -> Result<(String, TransportConfig)> {
+    use std::io::Write as _;
+
+    const TRANSPORTS: &[(&str, &str)] = &[
+        ("local",           "Local Bridge Server"),
+        ("tailscale-serve", "Tailscale Serve"),
+        ("tailscale-ip",    "Bridge IP (Tailscale)"),
+        ("cloudflare",      "Cloudflare Zero Trust"),
+    ];
+
+    loop {
+        println!("\nSelect a transport:");
+        for (i, &(internal, display)) in TRANSPORTS.iter().enumerate() {
+            let status = match config.transports.get(internal) {
+                Some(t) if t.enabled => "[ready]".to_string(),
+                _ => match internal {
+                    "local" => "[will auto-configure]".to_string(),
+                    "tailscale-serve" | "tailscale-ip" => {
+                        if is_tailscale_available() {
+                            "[will enable]".to_string()
+                        } else if is_tailscale_installed() {
+                            "[Tailscale not running]".to_string()
+                        } else {
+                            "[not installed]".to_string()
+                        }
+                    }
+                    "cloudflare" => "[setup required]".to_string(),
+                    _ => String::new(),
+                },
+            };
+            println!("  [{}] {:<30} {}", i + 1, display, status);
+        }
+        print!("Enter number [1]: ");
+        std::io::stdout().flush()?;
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let choice: usize = input.trim().parse().unwrap_or(1);
+        let idx = if choice >= 1 && choice <= TRANSPORTS.len() {
+            choice - 1
+        } else {
+            0
+        };
+
+        let (internal_name, _display_name) = TRANSPORTS[idx];
+
+        // If already configured and enabled, return it directly.
+        if let Some(t) = config.transports.get(internal_name) {
+            if t.enabled {
+                return Ok((internal_name.to_string(), t.clone()));
+            }
+        }
+
+        // Not configured — handle per-transport auto-configuration.
+        match internal_name {
+            "local" => {
+                let tc = TransportConfig {
+                    enabled: true,
+                    port: Some(8765),
+                    tls: Some(true),
+                    ..Default::default()
+                };
+                config.transports.insert("local".to_string(), tc.clone());
+                config.save()?;
+                println!("  ✅ Local transport configured (port 8765, TLS on)");
+                return Ok(("local".to_string(), tc));
+            }
+            "tailscale-serve" => {
+                if !is_tailscale_available() {
+                    println!("\n  ⚠️  Tailscale is not running. Start Tailscale and try again.\n");
+                    continue;
+                }
+                let tc = TransportConfig {
+                    enabled: true,
+                    port: Some(8766),
+                    tls: None,
+                    ..Default::default()
+                };
+                config.transports.insert("tailscale-serve".to_string(), tc.clone());
+                config.save()?;
+                println!("  ✅ Tailscale Serve transport configured (port 8766)");
+                return Ok(("tailscale-serve".to_string(), tc));
+            }
+            "tailscale-ip" => {
+                if !is_tailscale_available() {
+                    println!("\n  ⚠️  Tailscale is not running. Start Tailscale and try again.\n");
+                    continue;
+                }
+                let tc = TransportConfig {
+                    enabled: true,
+                    port: Some(8765),
+                    tls: Some(true),
+                    ..Default::default()
+                };
+                config.transports.insert("tailscale-ip".to_string(), tc.clone());
+                config.save()?;
+                println!("  ✅ Tailscale IP transport configured (port 8765, TLS on)");
+                return Ok(("tailscale-ip".to_string(), tc));
+            }
+            "cloudflare" => {
+                let tc = setup_cloudflare_transport().await?;
+                config.transports.insert("cloudflare".to_string(), tc.clone());
+                config.save()?;
+                return Ok(("cloudflare".to_string(), tc));
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -590,41 +777,7 @@ async fn main() -> Result<()> {
             config.ensure_auth_token();
             config.save()?;
 
-            let enabled: Vec<(String, TransportConfig)> = config
-                .enabled_transports()
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v.clone()))
-                .collect();
-
-            if enabled.is_empty() {
-                anyhow::bail!(
-                    "No transports are enabled in common.toml.\n\
-                     Add at least one transport section with `enabled = true`, e.g.:\n\
-                     \n\
-                     [transports.local]\n\
-                     enabled = true\n\
-                     port = 8765\n\
-                     tls = true"
-                );
-            }
-
-            // When more than one transport is enabled, ask the user to pick one.
-            let (transport_name, transport_cfg) = if enabled.len() == 1 {
-                enabled.into_iter().next().unwrap()
-            } else {
-                println!("\nMultiple transports are enabled. Select one to start:");
-                for (i, (name, _)) in enabled.iter().enumerate() {
-                    println!("  [{}] {}", i + 1, name);
-                }
-                print!("Enter number [1]: ");
-                use std::io::Write as _;
-                std::io::stdout().flush()?;
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input)?;
-                let choice: usize = input.trim().parse().unwrap_or(1);
-                let idx = choice.saturating_sub(1).min(enabled.len() - 1);
-                enabled.into_iter().nth(idx).unwrap()
-            };
+            let (transport_name, transport_cfg) = prompt_transport_selection(&mut config).await?;
 
             let config_dir = CommonConfig::config_dir();
 
@@ -649,7 +802,7 @@ async fn main() -> Result<()> {
                 build_transport(&transport_name, &transport_cfg, &config, &config_dir, advertise_addr.as_deref(), &cwd)?;
 
             if transport_name == "cloudflare" {
-                let json = config.to_connection_json(&hostname, &transport_name)?;
+                let json = config.to_connection_json(&hostname, &transport_name, &cwd)?;
                 qr::display_qr_code(&json, &transport_name)?;
             } else {
                 qr::display_qr_code_with_pairing(&hostname, &pm)?;

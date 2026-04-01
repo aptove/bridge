@@ -176,7 +176,7 @@ impl CommonConfig {
     ///
     /// Includes `agentId`, `url`, `protocol`, `version`, `authToken`, and
     /// Cloudflare credentials if present in the transport config.
-    pub fn to_connection_json(&self, hostname: &str, transport_name: &str) -> Result<String> {
+    pub fn to_connection_json(&self, hostname: &str, transport_name: &str, cwd: &str) -> Result<String> {
         use serde_json::{Map, Value};
         let transport = self.transports.get(transport_name);
         let mut map = Map::new();
@@ -186,6 +186,7 @@ impl CommonConfig {
         map.insert("url".to_string(), Value::String(hostname.to_string()));
         map.insert("protocol".to_string(), Value::String("acp".to_string()));
         map.insert("version".to_string(), Value::String("1.0".to_string()));
+        map.insert("cwd".to_string(), Value::String(cwd.to_string()));
         if !self.auth_token.is_empty() {
             map.insert(
                 "authToken".to_string(),
