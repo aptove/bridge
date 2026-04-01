@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 
 /// Errors that can occur during pairing
@@ -192,8 +193,11 @@ impl PairingManager {
             return Err(PairingError::InvalidCode);
         }
 
-        // Validate code
-        if code != self.code {
+        // Validate code using constant-time comparison to prevent timing side-channel attacks.
+        // A standard != on a 6-digit string would leak information about how many characters
+        // match, reducing the effective search space before the rate limit is reached.
+        let code_matches = code.as_bytes().ct_eq(self.code.as_bytes());
+        if code_matches.unwrap_u8() == 0 {
             self.attempts.fetch_add(1, Ordering::SeqCst);
             return Err(PairingError::InvalidCode);
         }
