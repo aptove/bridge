@@ -179,6 +179,15 @@ All settings live in one file. The path depends on how you run the bridge:
 
 When using `aptove run`, the config is shared across all workspaces.
 
+The config directory contains these files (all auto-generated on first run):
+
+| File | Purpose |
+|------|---------|
+| `common.toml` | Main config — `agent_id`, `auth_token`, and transport settings |
+| `cert.pem` | Self-signed TLS certificate for local transport |
+| `key.pem` | Private key for the TLS certificate |
+| `cert-extra-sans.json` | Tracks extra SANs in the TLS cert (e.g. `--advertise-addr`, Tailscale IP) |
+
 Override with `-c` / `--config-dir`:
 
 ```bash

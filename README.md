@@ -157,6 +157,17 @@ tls     = true
 
 Enable only the transports you need. `agent_id` and `auth_token` are generated automatically on first run and stay stable across restarts.
 
+#### Config Directory Files
+
+All bridge state lives in the config directory. These files are created automatically on first run:
+
+| File | Purpose |
+|------|---------|
+| `common.toml` | Main config — `agent_id`, `auth_token`, and transport settings. Permissions `0600`. |
+| `cert.pem` | Self-signed TLS certificate for the local transport WebSocket server. Its fingerprint is embedded in the QR pairing payload for certificate pinning. |
+| `key.pem` | Private key for the TLS certificate. |
+| `cert-extra-sans.json` | Tracks extra Subject Alternative Names (IPs/hostnames) baked into the TLS cert (e.g. `--advertise-addr` or Tailscale IP). When these change, the cert is automatically regenerated. |
+
 ### Commands
 
 #### `run` — Start the bridge (default)

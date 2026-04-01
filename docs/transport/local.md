@@ -212,6 +212,17 @@ validated by the mobile app before trusting the connection. The cert is reused
 across restarts; it is only regenerated when the SANs change (e.g. a new
 `--advertise-addr` is provided) or when `cert.pem` / `key.pem` are deleted.
 
+The current extra SANs are persisted in `cert-extra-sans.json` so the bridge
+can detect when they change and regenerate the certificate automatically.
+
+**TLS-related files in the config directory:**
+
+| File | Purpose |
+|------|---------|
+| `cert.pem` | Self-signed TLS certificate |
+| `key.pem` | Private key for the certificate |
+| `cert-extra-sans.json` | Tracks extra SANs baked into the cert (e.g. `--advertise-addr`, Tailscale IP) |
+
 ### Credentials and Auth Token
 
 `auth_token` is auto-generated (32 bytes, URL-safe base64) and stored in
