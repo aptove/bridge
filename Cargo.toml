@@ -85,6 +85,9 @@ toml = "1.1"
 # Binary path resolution (for agent command validation)
 which = "7"
 
+# Constant-time comparison (prevents timing side-channel on pairing codes)
+subtle = "2"
+
 [dev-dependencies]
 mockito = "1.2"
 tempfile = "3.10"
