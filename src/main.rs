@@ -11,6 +11,7 @@ use bridge::pairing::PairingManager;
 use bridge::tls::TlsConfig;
 use bridge::qr as qr;
 use bridge::tailscale::{is_tailscale_available, is_tailscale_installed, get_tailscale_ipv4, get_tailscale_hostname, tailscale_serve_start, TailscaleServeGuard};
+use bridge::agent_pool::{AgentPool, PoolConfig, start_reaper};
 
 #[derive(Parser)]
 #[command(name = "bridge", version = env!("CARGO_PKG_VERSION"))]
@@ -825,7 +826,16 @@ async fn main() -> Result<()> {
                 bridge = bridge.with_external_tls();
             }
 
-            // _ts_guard and _cf_runner live until end of this block (bridge lifetime).
+            // Enable agent pool for persistent sessions (keep-alive across disconnects)
+            let pool = std::sync::Arc::new(tokio::sync::RwLock::new(
+                AgentPool::new(PoolConfig::default())
+                    .with_working_dir(cwd.clone().into()),
+            ));
+            let _reaper = start_reaper(pool.clone(), std::time::Duration::from_secs(60));
+            bridge = bridge.with_agent_pool(pool);
+            info!("♻️  Agent pool enabled (idle timeout: 30m, max agents: 10)");
+
+            // _ts_guard, _cf_runner, and _reaper live until end of this block (bridge lifetime).
             match bridge.start().await {
                 Ok(()) => info!("Bridge exited cleanly"),
                 Err(e) => error!("Bridge error: {}", e),
