@@ -953,11 +953,22 @@ where
     let token_for_capture = token.clone();
     let pool_for_capture = Arc::clone(&pool);
 
+    // Track the request ID of `session/new` so Task 2 can identify the response
+    // regardless of the response shape (some agents don't return `sessionId`).
+    let pending_session_req_id: Arc<std::sync::Mutex<Option<serde_json::Value>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let pending_session_req_id_writer = Arc::clone(&pending_session_req_id);
+    let pending_session_req_id_reader = Arc::clone(&pending_session_req_id);
+
     // Keepalive / zombie-connection detection.
     // Starts as `true` (healthy). Task 2 swaps it to `false` each time it sends a
     // Ping; Task 1 resets it to `true` when a Pong arrives. If it is still `false`
     // on the next ping interval the client is considered dead and the connection is
     // closed so the rate-limiter slot is freed.
+    // Channel for Task 1 to inject synthetic responses back to the client
+    // (e.g., session/load errors on fresh agents). Task 2 reads from this.
+    let (inject_tx, mut inject_rx) = mpsc::channel::<String>(8);
+
     let pong_received = Arc::new(AtomicBool::new(true));
     let pong_received_for_receiver = Arc::clone(&pong_received);
 
@@ -1017,6 +1028,51 @@ where
                             }
                         }
                         
+                        // On fresh agents, intercept session/load and return a
+                        // synthetic error. A just-spawned agent has no sessions to
+                        // load, and some agents (e.g. Goose) hang on unknown
+                        // session IDs. The synthetic error lets the client fall
+                        // through to session/new and get the correct new session ID.
+                        // Also track session request IDs so Task 2 can cache the
+                        // session/new response.
+                        if needs_init_capture {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                                let method = v.get("method").and_then(|m| m.as_str());
+                                if let Some(m) = method {
+                                    info!("📥 Client request: method={}, id={}", m, v.get("id").map(|i| i.to_string()).unwrap_or_default());
+                                }
+                                if method == Some("session/load") {
+                                    if let Some(req_id) = v.get("id") {
+                                        let session_id = v.pointer("/params/sessionId")
+                                            .and_then(|s| s.as_str())
+                                            .or_else(|| v.pointer("/params/sessionId/value").and_then(|s| s.as_str()))
+                                            .unwrap_or("unknown");
+                                        info!("🔄 Returning synthetic error for session/load on fresh agent (id={}, session={})", req_id, session_id);
+                                        let error_response = serde_json::json!({
+                                            "jsonrpc": "2.0",
+                                            "id": req_id,
+                                            "error": {
+                                                "code": -32602,
+                                                "message": "Invalid params",
+                                                "data": format!("Session not found (fresh agent): {}", session_id)
+                                            }
+                                        });
+                                        let _ = inject_tx.send(serde_json::to_string(&error_response).unwrap_or_default()).await;
+                                    }
+                                    continue; // Don't forward session/load to agent
+                                }
+                                // Track session/new request IDs
+                                if method == Some("session/new") {
+                                    if let Some(id) = v.get("id") {
+                                        info!("📋 Tracking session/new request id={}", id);
+                                        if let Ok(mut guard) = pending_session_req_id_writer.lock() {
+                                            *guard = Some(id.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         if ws_to_agent_tx_clone.send(text).await.is_err() {
                             error!("Failed to send to agent channel");
                             break;
@@ -1064,9 +1120,52 @@ where
                         }
                     }
                     
-                    // On first connection, capture the createSession response
+                    // On first connection, capture the createSession response.
+                    // First try matching by response shape (result.sessionId), then
+                    // fall back to matching the response ID against the tracked
+                    // session/new request ID — this handles agents (e.g. Goose)
+                    // whose session response doesn't include a sessionId field.
                     if needs_init_capture && !session_captured {
-                        if is_create_session_response(&line) {
+                        // Log all agent responses during capture phase for debugging
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if v.get("result").is_some() || v.get("error").is_some() {
+                                let has_result = v.get("result").is_some();
+                                let has_error = v.get("error").is_some();
+                                let resp_id = v.get("id").map(|i| i.to_string()).unwrap_or_default();
+                                let pending = pending_session_req_id_reader
+                                    .lock()
+                                    .map(|g| g.as_ref().map(|i| i.to_string()).unwrap_or("none".into()))
+                                    .unwrap_or("lock-err".into());
+                                info!("📤 Agent response: id={}, has_result={}, has_error={}, pending_session_id={}, preview={}",
+                                    resp_id, has_result, has_error, pending,
+                                    line.chars().take(300).collect::<String>());
+                            }
+                        }
+
+                        let is_session_resp = if is_create_session_response(&line) {
+                            info!("📋 Session response matched by sessionId field");
+                            true
+                        } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if v.get("result").is_some() {
+                                if let Some(resp_id) = v.get("id") {
+                                    let matches = pending_session_req_id_reader
+                                        .lock()
+                                        .map(|guard| guard.as_ref() == Some(resp_id))
+                                        .unwrap_or(false);
+                                    if matches {
+                                        info!("📋 Session response matched by request ID (id={})", resp_id);
+                                    }
+                                    matches
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                        if is_session_resp {
                             info!("📋 Captured createSession response for future reconnections");
                             let mut pool = pool_for_capture.write().await;
                             pool.cache_session_response(&token_for_capture, line.clone());
@@ -1102,6 +1201,14 @@ where
                     break;
                 }
             } } // end match result / end recv arm
+            Some(injected) = inject_rx.recv() => {
+                // Synthetic response injected by Task 1 (e.g., session/load error)
+                debug!("📤 Sending injected response to Mobile ({} bytes)", injected.len());
+                if let Err(e) = ws_sender.send(Message::Text(injected.into())).await {
+                    debug!("Client disconnected while sending injected response: {}", e);
+                    break;
+                }
+            }
             _ = ping_interval.tick() => {
                 // If the previous ping went unanswered the client is gone.
                 if !pong_received.swap(false, Ordering::Relaxed) {
