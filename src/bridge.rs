@@ -1038,9 +1038,6 @@ where
                         if needs_init_capture {
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                                 let method = v.get("method").and_then(|m| m.as_str());
-                                if let Some(m) = method {
-                                    info!("📥 Client request: method={}, id={}", m, v.get("id").map(|i| i.to_string()).unwrap_or_default());
-                                }
                                 if method == Some("session/load") {
                                     if let Some(req_id) = v.get("id") {
                                         let session_id = v.pointer("/params/sessionId")
@@ -1126,24 +1123,7 @@ where
                     // session/new request ID — this handles agents (e.g. Goose)
                     // whose session response doesn't include a sessionId field.
                     if needs_init_capture && !session_captured {
-                        // Log all agent responses during capture phase for debugging
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                            if v.get("result").is_some() || v.get("error").is_some() {
-                                let has_result = v.get("result").is_some();
-                                let has_error = v.get("error").is_some();
-                                let resp_id = v.get("id").map(|i| i.to_string()).unwrap_or_default();
-                                let pending = pending_session_req_id_reader
-                                    .lock()
-                                    .map(|g| g.as_ref().map(|i| i.to_string()).unwrap_or("none".into()))
-                                    .unwrap_or("lock-err".into());
-                                info!("📤 Agent response: id={}, has_result={}, has_error={}, pending_session_id={}, preview={}",
-                                    resp_id, has_result, has_error, pending,
-                                    line.chars().take(300).collect::<String>());
-                            }
-                        }
-
                         let is_session_resp = if is_create_session_response(&line) {
-                            info!("📋 Session response matched by sessionId field");
                             true
                         } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
                             if v.get("result").is_some() {
@@ -1173,9 +1153,22 @@ where
                         }
                     }
                     
-                    debug!("📤 Sending to Mobile ({} bytes): {}", line.len(), 
+                    // If the agent reports "Session not found", invalidate the
+                    // cached session so the next reconnect creates a fresh one
+                    // instead of replaying a stale session ID.
+                    if line.contains("Session not found") {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if v.get("error").is_some() {
+                                warn!("🗑️ Agent reported 'Session not found' — invalidating cached session");
+                                let mut pool = pool_for_capture.write().await;
+                                pool.clear_session_response(&token_for_capture);
+                            }
+                        }
+                    }
+
+                    debug!("📤 Sending to Mobile ({} bytes): {}", line.len(),
                         line.chars().take(200).collect::<String>());
-                    
+
                     if let Err(e) = ws_sender.send(Message::Text(line.clone().into())).await {
                         debug!("Client disconnected, buffering message: {}", e);
                         let mut pool = pool_for_buffer.write().await;

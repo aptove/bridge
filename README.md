@@ -40,7 +40,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-aptove-bridge = "0.1"
+aptove-bridge = "0.2"
 ```
 
 ### Minimal Example

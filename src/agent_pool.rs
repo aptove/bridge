@@ -318,6 +318,16 @@ impl AgentPool {
         }
     }
 
+    /// Clear the cached session response (e.g., when agent reports "Session not found")
+    pub fn clear_session_response(&mut self, token: &str) {
+        if let Some(agent) = self.agents.get_mut(token) {
+            if agent.cached_session_response.is_some() {
+                info!("Cleared cached session response for agent (session invalidated)");
+                agent.cached_session_response = None;
+            }
+        }
+    }
+
     /// Remove and kill an agent
     #[allow(dead_code)]
     pub async fn remove_agent(&mut self, token: &str) {
