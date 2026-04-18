@@ -344,7 +344,7 @@ fn build_transport(
                     "tailscale-serve mode requires MagicDNS + HTTPS to be enabled on your tailnet.\n\
                      Enable HTTPS in the Tailscale admin console: https://tailscale.com/kb/1153/enabling-https"
                 ))?;
-            let hostname = format!("wss://{}", ts_hostname);
+            let hostname = format!("wss://{}:{}", ts_hostname, port);
 
             let pm = PairingManager::new_with_cf(
                 common.agent_id.clone(),
@@ -358,7 +358,7 @@ fn build_transport(
 
             info!("🌐 Starting tailscale serve...");
             let guard = tailscale_serve_start(port)?;
-            println!("📡 Tailscale (serve): wss://{}", ts_hostname);
+            println!("📡 Tailscale (serve): wss://{}:{}", ts_hostname, port);
 
             Ok((hostname, pm, None, Some(guard), None))
         }
@@ -485,7 +485,7 @@ fn show_static_qr(
         "tailscale-serve" => {
             let ts_hostname = get_tailscale_hostname()?
                 .ok_or_else(|| anyhow::anyhow!("Tailscale MagicDNS hostname not available"))?;
-            map.insert("url".to_string(), Value::String(format!("wss://{}", ts_hostname)));
+            map.insert("url".to_string(), Value::String(format!("wss://{}:{}", ts_hostname, port)));
         }
         "tailscale-ip" => {
             let ts_ip = get_tailscale_ipv4()?;

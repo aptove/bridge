@@ -91,10 +91,9 @@ impl CommonConfig {
         let dir = if let Some(custom) = COMMON_CUSTOM_CONFIG_DIR.get() {
             custom.clone()
         } else {
-            directories::ProjectDirs::from("com", "aptove", "bridge")
-                .expect("Failed to determine config directory")
-                .config_dir()
-                .to_path_buf()
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".aptove-bridge")
         };
         fs::create_dir_all(&dir).ok();
         dir

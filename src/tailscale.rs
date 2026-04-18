@@ -160,7 +160,7 @@ impl Drop for TailscaleServeGuard {
     fn drop(&mut self) {
         debug!("TailscaleServeGuard dropped — removing tailscale serve config for port {}", self.port);
         let _ = Command::new("tailscale")
-            .args(["serve", "reset"])
+            .args(["serve", &format!("--https={}", self.port), "off"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
@@ -189,7 +189,7 @@ pub fn tailscale_serve_start(port: u16) -> Result<TailscaleServeGuard> {
     info!("🔧 Configuring tailscale serve → localhost:{}", port);
     let backend = format!("http://localhost:{}", port);
     let status = Command::new("tailscale")
-        .args(["serve", "--bg", "--https=443", &backend])
+        .args(["serve", "--bg", &format!("--https={}", port), &backend])
         .status()
         .context("Failed to run 'tailscale serve'")?;
     if !status.success() {
