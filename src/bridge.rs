@@ -18,6 +18,7 @@ use tokio_tungstenite::tungstenite::http::StatusCode;
 use tracing::{debug, error, info, warn};
 
 use crate::agent_pool::AgentPool;
+use crate::common_config::SlashCommandConfig;
 use crate::rate_limiter::RateLimiter;
 use crate::tls::TlsConfig;
 use crate::pairing::{PairingManager, PairingError, PairingErrorResponse};
@@ -107,6 +108,10 @@ pub struct StdioBridge {
     external_tls: bool,
     /// Working directory for spawned agent processes.
     working_dir: PathBuf,
+    /// Slash commands to inject via `available_commands_update` after every
+    /// session/new or session/load, for agents that don't send the notification
+    /// themselves (e.g. Copilot CLI).
+    slash_commands: Arc<Vec<SlashCommandConfig>>,
 }
 
 impl StdioBridge {
@@ -125,7 +130,15 @@ impl StdioBridge {
             webhook_rate_limiter: Arc::new(Mutex::new(TriggerRateLimiter::new())),
             external_tls: false,
             working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            slash_commands: Arc::new(Vec::new()),
         }
+    }
+
+    /// Set slash commands to inject after session creation for agents that
+    /// don't send `available_commands_update` themselves.
+    pub fn with_slash_commands(mut self, commands: Vec<SlashCommandConfig>) -> Self {
+        self.slash_commands = Arc::new(commands);
+        self
     }
 
     /// Set the working directory for spawned agent processes.
@@ -267,6 +280,7 @@ impl StdioBridge {
                     let webhook_rate_limiter = Arc::clone(&webhook_rate_limiter);
                     let client_ip_str = addr.ip().to_string();
                     let working_dir = self.working_dir.clone();
+                    let slash_commands = Arc::clone(&self.slash_commands);
 
                     tokio::spawn(async move {
                         // Register connection
@@ -276,7 +290,7 @@ impl StdioBridge {
                             // TLS connection
                             match tls.acceptor.accept(stream).await {
                                 Ok(tls_stream) => {
-                                    handle_connection_generic(tls_stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay, webhook_resolver, webhook_rate_limiter, client_ip_str, working_dir).await
+                                    handle_connection_generic(tls_stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay, webhook_resolver, webhook_rate_limiter, client_ip_str, working_dir, slash_commands).await
                                 }
                                 Err(e) => {
                                     warn!("🚫 TLS handshake failed: {}", e);
@@ -285,7 +299,7 @@ impl StdioBridge {
                             }
                         } else {
                             // Plain TCP connection
-                            handle_connection_generic(stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay, webhook_resolver, webhook_rate_limiter, client_ip_str, working_dir).await
+                            handle_connection_generic(stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay, webhook_resolver, webhook_rate_limiter, client_ip_str, working_dir, slash_commands).await
                         };
 
                         // Always remove connection when done
@@ -320,6 +334,7 @@ async fn handle_connection_generic<S>(
     webhook_rate_limiter: Arc<Mutex<TriggerRateLimiter>>,
     client_ip: String,
     working_dir: PathBuf,
+    slash_commands: Arc<Vec<SlashCommandConfig>>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -374,7 +389,7 @@ where
     let prefixed_stream = PrefixedStream::new(request_bytes, stream);
     
     // Continue with WebSocket handling
-    handle_websocket_connection(prefixed_stream, agent_handle, auth_token, agent_pool, push_relay, working_dir).await
+    handle_websocket_connection(prefixed_stream, agent_handle, auth_token, agent_pool, push_relay, working_dir, slash_commands).await
 }
 
 /// Handle a pairing request - validate the code and return connection details
@@ -782,7 +797,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<S> {
 }
 
 /// Handle WebSocket connection after initial HTTP parsing
-async fn handle_websocket_connection<S>(stream: S, agent_handle: AgentHandle, auth_token: Arc<Option<String>>, agent_pool: Option<Arc<tokio::sync::RwLock<AgentPool>>>, push_relay: Option<Arc<PushRelayClient>>, working_dir: PathBuf) -> Result<()>
+async fn handle_websocket_connection<S>(stream: S, agent_handle: AgentHandle, auth_token: Arc<Option<String>>, agent_pool: Option<Arc<tokio::sync::RwLock<AgentPool>>>, push_relay: Option<Arc<PushRelayClient>>, working_dir: PathBuf, slash_commands: Arc<Vec<SlashCommandConfig>>) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -864,7 +879,7 @@ where
             handle_websocket_with_handle(ws_stream, agent_handle, push_relay, working_dir).await
         } else {
             if let AgentHandle::Command(ref cmd) = agent_handle {
-                handle_websocket_pooled(ws_stream, cmd.clone(), client_token, pool, push_relay, working_dir.clone()).await
+                handle_websocket_pooled(ws_stream, cmd.clone(), client_token, pool, push_relay, working_dir.clone(), slash_commands).await
             } else {
                 // InProcess handles don't support pooling yet; fall back to per-connection
                 handle_websocket_with_handle(ws_stream, agent_handle, push_relay, working_dir).await
@@ -883,6 +898,7 @@ async fn handle_websocket_pooled<S>(
     pool: Arc<tokio::sync::RwLock<AgentPool>>,
     push_relay: Option<Arc<PushRelayClient>>,
     _working_dir: PathBuf,
+    slash_commands: Arc<Vec<SlashCommandConfig>>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -932,7 +948,7 @@ where
         if let Some(ref cached) = cached_session {
             info!("🔄 Intercepting session request for session resumption");
             let session_handled = handle_create_session_intercept(
-                &mut ws_receiver, &mut ws_sender, cached
+                &mut ws_receiver, &mut ws_sender, cached, &slash_commands
             ).await;
             if session_handled {
                 info!("✅ Session request intercepted, reusing existing session");
@@ -1152,7 +1168,7 @@ where
                             session_captured = true;
                         }
                     }
-                    
+
                     // If the agent reports "Session not found", invalidate the
                     // cached session so the next reconnect creates a fresh one
                     // instead of replaying a stale session ID.
@@ -1165,6 +1181,12 @@ where
                             }
                         }
                     }
+
+                    // Check whether this line is a session response we should
+                    // follow up with available_commands_update.
+                    let inject_commands = !slash_commands.is_empty()
+                        && is_create_session_response(&line)
+                        && !line.contains("\"error\"");
 
                     debug!("📤 Sending to Mobile ({} bytes): {}", line.len(),
                         line.chars().take(200).collect::<String>());
@@ -1183,6 +1205,19 @@ where
                             });
                         }
                         break;
+                    }
+
+                    // Inject available_commands_update immediately after the session
+                    // response so clients that connect to agents without native support
+                    // (e.g. Copilot CLI) still get the command picker populated.
+                    if inject_commands {
+                        if let Some(session_id) = extract_session_id_from_response(&line) {
+                            let notification = build_available_commands_notification(
+                                &session_id, &slash_commands,
+                            );
+                            info!("📋 Injecting available_commands_update for session {}", session_id);
+                            let _ = ws_sender.send(Message::Text(notification.into())).await;
+                        }
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -1276,12 +1311,62 @@ fn is_create_session_response(msg: &str) -> bool {
     }
 }
 
+/// Extract the `sessionId` string from a JSON-RPC session/new response.
+fn extract_session_id_from_response(response: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(response)
+        .ok()
+        .and_then(|v| {
+            v.get("result")
+                .and_then(|r| r.get("sessionId"))
+                .and_then(|s| s.as_str())
+                .map(String::from)
+        })
+}
+
+/// Build a `session/update` JSON-RPC notification carrying `available_commands_update`.
+///
+/// The serialisation follows the ACP schema:
+/// - `SessionUpdate` is tagged with `"sessionUpdate": "available_commands_update"`
+/// - `AvailableCommand` uses camelCase; `input` is only present when `input_hint` is set
+fn build_available_commands_notification(
+    session_id: &str,
+    commands: &[SlashCommandConfig],
+) -> String {
+    let cmds: Vec<serde_json::Value> = commands
+        .iter()
+        .map(|c| {
+            let mut obj = serde_json::json!({
+                "name": c.name,
+                "description": c.description,
+            });
+            if let Some(ref hint) = c.input_hint {
+                obj["input"] = serde_json::json!({ "hint": hint });
+            }
+            obj
+        })
+        .collect();
+
+    serde_json::to_string(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": "available_commands_update",
+                "availableCommands": cmds
+            }
+        }
+    }))
+    .unwrap_or_default()
+}
+
 /// Intercept the client's `createSession` request and reply with a cached response.
 /// Returns true if a createSession was intercepted, false otherwise.
 async fn handle_create_session_intercept<S>(
     ws_receiver: &mut futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<S>>,
     ws_sender: &mut futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<S>, Message>,
     cached_response: &str,
+    slash_commands: &[SlashCommandConfig],
 ) -> bool
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -1395,7 +1480,17 @@ where
         error!("Failed to send cached session response: {}", e);
         return false;
     }
-    
+
+    // Inject available_commands_update so clients get the command picker
+    // even when the agent doesn't send this notification itself.
+    if !slash_commands.is_empty() {
+        if let Some(session_id) = extract_session_id_from_response(cached_response) {
+            let notification = build_available_commands_notification(&session_id, slash_commands);
+            info!("📋 Injecting available_commands_update for cached session {}", session_id);
+            let _ = ws_sender.send(Message::Text(notification.into())).await;
+        }
+    }
+
     true
 }
 

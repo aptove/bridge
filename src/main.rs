@@ -597,6 +597,20 @@ fn prompt_agent_command() -> Result<String> {
 /// Always shows all four transport options with a status indicator. If the chosen
 /// transport is not yet configured in `config.transports`, it is created on the fly
 /// and `config` is mutated + saved.
+fn prompt_port(default: u16) -> Result<u16> {
+    use std::io::Write as _;
+    print!("  Enter port [{}]: ", default);
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        Ok(default)
+    } else {
+        trimmed.parse::<u16>().map_err(|_| anyhow::anyhow!("Invalid port number"))
+    }
+}
+
 async fn prompt_transport_selection(config: &mut CommonConfig) -> Result<(String, TransportConfig)> {
     use std::io::Write as _;
 
@@ -643,25 +657,22 @@ async fn prompt_transport_selection(config: &mut CommonConfig) -> Result<(String
 
         let (internal_name, _display_name) = TRANSPORTS[idx];
 
-        // If already configured and enabled, return it directly.
-        if let Some(t) = config.transports.get(internal_name) {
-            if t.enabled {
-                return Ok((internal_name.to_string(), t.clone()));
-            }
-        }
-
         // Not configured — handle per-transport auto-configuration.
         match internal_name {
             "local" => {
+                let default_port = config.transports.get("local")
+                    .and_then(|t| t.port)
+                    .unwrap_or(8765);
+                let port = prompt_port(default_port)?;
                 let tc = TransportConfig {
                     enabled: true,
-                    port: Some(8765),
+                    port: Some(port),
                     tls: Some(true),
                     ..Default::default()
                 };
                 config.transports.insert("local".to_string(), tc.clone());
                 config.save()?;
-                println!("  ✅ Local transport configured (port 8765, TLS on)");
+                println!("  ✅ Local transport configured (port {}, TLS on)", port);
                 return Ok(("local".to_string(), tc));
             }
             "tailscale-serve" => {
@@ -669,15 +680,19 @@ async fn prompt_transport_selection(config: &mut CommonConfig) -> Result<(String
                     println!("\n  ⚠️  Tailscale is not running. Start Tailscale and try again.\n");
                     continue;
                 }
+                let default_port = config.transports.get("tailscale-serve")
+                    .and_then(|t| t.port)
+                    .unwrap_or(8766);
+                let port = prompt_port(default_port)?;
                 let tc = TransportConfig {
                     enabled: true,
-                    port: Some(8766),
+                    port: Some(port),
                     tls: None,
                     ..Default::default()
                 };
                 config.transports.insert("tailscale-serve".to_string(), tc.clone());
                 config.save()?;
-                println!("  ✅ Tailscale Serve transport configured (port 8766)");
+                println!("  ✅ Tailscale Serve transport configured (port {})", port);
                 return Ok(("tailscale-serve".to_string(), tc));
             }
             "tailscale-ip" => {
@@ -685,15 +700,19 @@ async fn prompt_transport_selection(config: &mut CommonConfig) -> Result<(String
                     println!("\n  ⚠️  Tailscale is not running. Start Tailscale and try again.\n");
                     continue;
                 }
+                let default_port = config.transports.get("tailscale-ip")
+                    .and_then(|t| t.port)
+                    .unwrap_or(8765);
+                let port = prompt_port(default_port)?;
                 let tc = TransportConfig {
                     enabled: true,
-                    port: Some(8765),
+                    port: Some(port),
                     tls: Some(true),
                     ..Default::default()
                 };
                 config.transports.insert("tailscale-ip".to_string(), tc.clone());
                 config.save()?;
-                println!("  ✅ Tailscale IP transport configured (port 8765, TLS on)");
+                println!("  ✅ Tailscale IP transport configured (port {}, TLS on)", port);
                 return Ok(("tailscale-ip".to_string(), tc));
             }
             "cloudflare" => {
@@ -825,13 +844,9 @@ async fn main() -> Result<()> {
             config.ensure_auth_token();
             config.save()?;
 
-            let (transport_name, transport_cfg) = prompt_transport_selection(&mut config).await?;
+            let (transport_name, mut transport_cfg) = prompt_transport_selection(&mut config).await?;
 
             let config_dir = CommonConfig::config_dir();
-
-            // tailscale-serve defaults to 8766 to avoid conflicting with local (8765).
-            let default_port: u16 = if transport_name == "tailscale-serve" { 8766 } else { 8765 };
-            let port = transport_cfg.port.unwrap_or(default_port);
 
             // tailscale-serve proxies from Tailscale edge → localhost, so bind
             // to 127.0.0.1 only; all other transports use the user-supplied bind addr.
@@ -840,6 +855,27 @@ async fn main() -> Result<()> {
             } else {
                 bind.clone()
             };
+
+            // Ensure the chosen port is free; re-prompt if taken.
+            loop {
+                let default_port: u16 = if transport_name == "tailscale-serve" { 8766 } else { 8765 };
+                let port = transport_cfg.port.unwrap_or(default_port);
+                let check_addr = format!("{}:{}", effective_bind, port);
+                if std::net::TcpListener::bind(&check_addr).is_ok() {
+                    break;
+                }
+                println!("\n  ⚠️  Port {} is already in use. Choose a different port.", port);
+                let new_port = prompt_port(port.saturating_add(1))?;
+                transport_cfg.port = Some(new_port);
+                if let Some(t) = config.transports.get_mut(&transport_name) {
+                    t.port = Some(new_port);
+                }
+                config.save()?;
+            }
+
+            // tailscale-serve defaults to 8766 to avoid conflicting with local (8765).
+            let default_port: u16 = if transport_name == "tailscale-serve" { 8766 } else { 8765 };
+            let port = transport_cfg.port.unwrap_or(default_port);
 
             let cwd = std::env::current_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -881,6 +917,13 @@ async fn main() -> Result<()> {
             let _reaper = start_reaper(pool.clone(), std::time::Duration::from_secs(60));
             bridge = bridge.with_agent_pool(pool);
             info!("♻️  Agent pool enabled (idle timeout: 30m, max agents: 10)");
+
+            // Inject slash commands configured in common.toml (for agents that
+            // don't send available_commands_update themselves, e.g. Copilot CLI).
+            if !config.slash_commands.is_empty() {
+                info!("📋 {} slash command(s) configured for injection", config.slash_commands.len());
+                bridge = bridge.with_slash_commands(config.slash_commands.clone());
+            }
 
             // _ts_guard, _cf_runner, and _reaper live until end of this block (bridge lifetime).
             match bridge.start().await {

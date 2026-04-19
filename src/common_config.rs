@@ -17,6 +17,34 @@ pub fn set_config_dir(path: PathBuf) {
     COMMON_CUSTOM_CONFIG_DIR.set(path).ok();
 }
 
+/// A slash command advertised to connected clients via `available_commands_update`.
+///
+/// Define these in `common.toml` for agents that don't send `available_commands_update`
+/// themselves (e.g. Copilot CLI, Goose).
+///
+/// Example `common.toml` entry:
+/// ```toml
+/// [[slash_commands]]
+/// name        = "fix"
+/// description = "Fix the selected code"
+///
+/// [[slash_commands]]
+/// name        = "explain"
+/// description = "Explain the code, optionally with a focus"
+/// input_hint  = "what to focus on"
+/// ```
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SlashCommandConfig {
+    /// Command name without the leading `/` (e.g. `"fix"`).
+    pub name: String,
+    /// Human-readable description shown in the picker.
+    pub description: String,
+    /// If set, the command accepts free-text input; this string is shown as
+    /// the placeholder hint in the text field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_hint: Option<String>,
+}
+
 /// Stable agent identity and multi-transport settings.
 ///
 /// Replaces the old `BridgeConfig` / `bridge.toml`. Stored as `common.toml`.
@@ -34,6 +62,12 @@ pub struct CommonConfig {
     /// (e.g., `"local"`, `"cloudflare"`, `"tailscale-serve"`, `"tailscale-ip"`).
     #[serde(default)]
     pub transports: HashMap<String, TransportConfig>,
+
+    /// Slash commands to advertise to clients via `available_commands_update`.
+    /// Used for agents that don't send this notification themselves.
+    /// The bridge injects the notification after every session/new or session/load.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slash_commands: Vec<SlashCommandConfig>,
 }
 
 /// Configuration for a single transport.
@@ -76,6 +110,7 @@ impl Default for CommonConfig {
             agent_id: String::new(),
             auth_token: String::new(),
             transports,
+            slash_commands: Vec::new(),
         }
     }
 }
