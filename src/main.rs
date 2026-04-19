@@ -626,7 +626,13 @@ async fn prompt_transport_selection(config: &mut CommonConfig) -> Result<(String
                 let default_port = config.transports.get("local")
                     .and_then(|t| t.port)
                     .unwrap_or(8765);
-                let port = prompt_port(default_port)?;
+                let port = if std::net::TcpListener::bind(format!("0.0.0.0:{}", default_port)).is_ok() {
+                    println!("  Using port {}", default_port);
+                    default_port
+                } else {
+                    println!("  ⚠️  Port {} is already in use.", default_port);
+                    prompt_port(default_port.saturating_add(1))?
+                };
                 let tc = TransportConfig {
                     enabled: true,
                     port: Some(port),
@@ -646,7 +652,13 @@ async fn prompt_transport_selection(config: &mut CommonConfig) -> Result<(String
                 let default_port = config.transports.get("tailscale-serve")
                     .and_then(|t| t.port)
                     .unwrap_or(8766);
-                let port = prompt_port(default_port)?;
+                let port = if std::net::TcpListener::bind(format!("0.0.0.0:{}", default_port)).is_ok() {
+                    println!("  Using port {}", default_port);
+                    default_port
+                } else {
+                    println!("  ⚠️  Port {} is already in use.", default_port);
+                    prompt_port(default_port.saturating_add(1))?
+                };
                 let tc = TransportConfig {
                     enabled: true,
                     port: Some(port),
