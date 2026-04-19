@@ -5,7 +5,7 @@ use tracing::{info, error, warn};
 use bridge::cloudflare::{CloudflareClient, write_credentials_file, write_cloudflared_config, cloudflared_config_path};
 use bridge::cloudflared_runner::CloudflaredRunner;
 use bridge::bridge::StdioBridge;
-use bridge::common_config::{self as common_config, CommonConfig, TransportConfig};
+use bridge::common_config::{self as common_config, CommonConfig, SlashCommandConfig, TransportConfig};
 use bridge::config::{self as config, BridgeConfig};
 use bridge::pairing::PairingManager;
 use bridge::tls::TlsConfig;
@@ -363,35 +363,6 @@ fn build_transport(
             Ok((hostname, pm, None, Some(guard), None))
         }
 
-        "tailscale-ip" => {
-            let ts_ip = get_tailscale_ipv4()?;
-            let addr = get_tailscale_hostname()?
-                .unwrap_or_else(|| ts_ip.clone());
-            let extra_sans = vec![ts_ip];
-
-            let tls_config = if use_tls {
-                Some(TlsConfig::load_or_generate(config_dir, &extra_sans)?)
-            } else {
-                None
-            };
-            let cert_fingerprint = tls_config.as_ref().map(|t| t.fingerprint.clone());
-            let protocol = if tls_config.is_some() { "wss" } else { "ws" };
-            let hostname = format!("{}://{}:{}", protocol, addr, port);
-            println!("📡 Tailscale (ip): {}", hostname);
-
-            let pm = PairingManager::new_with_cf(
-                common.agent_id.clone(),
-                hostname.clone(),
-                common.auth_token.clone(),
-                cert_fingerprint,
-                None,
-                None,
-                cwd.to_string(),
-            ).with_tailscale_path();
-
-            Ok((hostname, pm, tls_config, None, None))
-        }
-
         _ => {
             // "local" and any unknown transports — local network with self-signed TLS.
             // Include the advertise_addr in the cert SANs so iOS TLS validation passes
@@ -486,13 +457,6 @@ fn show_static_qr(
             let ts_hostname = get_tailscale_hostname()?
                 .ok_or_else(|| anyhow::anyhow!("Tailscale MagicDNS hostname not available"))?;
             map.insert("url".to_string(), Value::String(format!("wss://{}:{}", ts_hostname, port)));
-        }
-        "tailscale-ip" => {
-            let ts_ip = get_tailscale_ipv4()?;
-            let addr = get_tailscale_hostname()?.unwrap_or_else(|| ts_ip.clone());
-            let tls_config = TlsConfig::load_or_generate(config_dir, &[ts_ip])?;
-            map.insert("url".to_string(), Value::String(format!("wss://{}:{}", addr, port)));
-            map.insert("certFingerprint".to_string(), Value::String(tls_config.fingerprint));
         }
         _ => {
             // "local" and any unknown name
@@ -616,8 +580,7 @@ async fn prompt_transport_selection(config: &mut CommonConfig) -> Result<(String
 
     const TRANSPORTS: &[(&str, &str)] = &[
         ("local",           "Local Bridge Server"),
-        ("tailscale-serve", "Tailscale Serve"),
-        ("tailscale-ip",    "Bridge IP (Tailscale)"),
+        ("tailscale-serve", "Tailscale (Recommended)"),
         ("cloudflare",      "Cloudflare Zero Trust"),
     ];
 
@@ -628,7 +591,7 @@ async fn prompt_transport_selection(config: &mut CommonConfig) -> Result<(String
                 Some(t) if t.enabled => "[ready]".to_string(),
                 _ => match internal {
                     "local" => "[will auto-configure]".to_string(),
-                    "tailscale-serve" | "tailscale-ip" => {
+                    "tailscale-serve" => {
                         if is_tailscale_available() {
                             "[will enable]".to_string()
                         } else if is_tailscale_installed() {
@@ -694,26 +657,6 @@ async fn prompt_transport_selection(config: &mut CommonConfig) -> Result<(String
                 config.save()?;
                 println!("  ✅ Tailscale Serve transport configured (port {})", port);
                 return Ok(("tailscale-serve".to_string(), tc));
-            }
-            "tailscale-ip" => {
-                if !is_tailscale_available() {
-                    println!("\n  ⚠️  Tailscale is not running. Start Tailscale and try again.\n");
-                    continue;
-                }
-                let default_port = config.transports.get("tailscale-ip")
-                    .and_then(|t| t.port)
-                    .unwrap_or(8765);
-                let port = prompt_port(default_port)?;
-                let tc = TransportConfig {
-                    enabled: true,
-                    port: Some(port),
-                    tls: Some(true),
-                    ..Default::default()
-                };
-                config.transports.insert("tailscale-ip".to_string(), tc.clone());
-                config.save()?;
-                println!("  ✅ Tailscale IP transport configured (port {}, TLS on)", port);
-                return Ok(("tailscale-ip".to_string(), tc));
             }
             "cloudflare" => {
                 let tc = setup_cloudflare_transport().await?;
@@ -918,12 +861,21 @@ async fn main() -> Result<()> {
             bridge = bridge.with_agent_pool(pool);
             info!("♻️  Agent pool enabled (idle timeout: 30m, max agents: 10)");
 
-            // Inject slash commands configured in common.toml (for agents that
-            // don't send available_commands_update themselves, e.g. Copilot CLI).
-            if !config.slash_commands.is_empty() {
-                info!("📋 {} slash command(s) configured for injection", config.slash_commands.len());
-                bridge = bridge.with_slash_commands(config.slash_commands.clone());
-            }
+            // Inject slash commands for agents that don't send
+            // available_commands_update themselves (e.g. Copilot CLI).
+            // Use commands from common.toml if configured, otherwise built-in defaults.
+            let slash_commands = if config.slash_commands.is_empty() {
+                vec![
+                    SlashCommandConfig { name: "help".into(), description: "Show available commands and usage".into(), input_hint: None },
+                    SlashCommandConfig { name: "clear".into(), description: "Clear the conversation history".into(), input_hint: None },
+                    SlashCommandConfig { name: "compact".into(), description: "Compact conversation history, optionally with a focus topic".into(), input_hint: Some("focus topic (optional)".into()) },
+                    SlashCommandConfig { name: "agent".into(), description: "Configure agent settings".into(), input_hint: None },
+                ]
+            } else {
+                config.slash_commands.clone()
+            };
+            info!("📋 {} slash command(s) configured for injection", slash_commands.len());
+            bridge = bridge.with_slash_commands(slash_commands);
 
             // _ts_guard, _cf_runner, and _reaper live until end of this block (bridge lifetime).
             match bridge.start().await {
