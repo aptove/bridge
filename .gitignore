@@ -24,3 +24,6 @@ target/
 # Environment files
 .env
 .env.local
+
+# Bridge Config
+.aptove-bridge/

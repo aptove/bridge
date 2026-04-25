@@ -344,7 +344,8 @@ fn build_transport(
                     "tailscale-serve mode requires MagicDNS + HTTPS to be enabled on your tailnet.\n\
                      Enable HTTPS in the Tailscale admin console: https://tailscale.com/kb/1153/enabling-https"
                 ))?;
-            let hostname = format!("wss://{}:{}", ts_hostname, port);
+            // Tailscale serve always exposes on port 443, so no port suffix in the URL.
+            let hostname = format!("wss://{}", ts_hostname);
 
             let pm = PairingManager::new_with_cf(
                 common.agent_id.clone(),
@@ -358,7 +359,7 @@ fn build_transport(
 
             info!("🌐 Starting tailscale serve...");
             let guard = tailscale_serve_start(port)?;
-            println!("📡 Tailscale (serve): wss://{}:{}", ts_hostname, port);
+            println!("📡 Tailscale (serve): wss://{}", ts_hostname);
 
             Ok((hostname, pm, None, Some(guard), None))
         }

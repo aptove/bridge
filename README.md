@@ -18,8 +18,7 @@ A bridge library and application between Agent Client Protocol (ACP) agents and 
 |------|----------|---------------|
 | **Local** | Same Wi-Fi network, secure pairing with QR code | [docs/transport/local.md](docs/transport/local.md) |
 | **Cloudflare** | Remote access via Cloudflare Zero Trust (internet-accessible) | [docs/transport/cloudflare.md](docs/transport/cloudflare.md) |
-| **Tailscale Serve** | Private overlay network via MagicDNS + HTTPS | [docs/transport/tailscale.md](docs/transport/tailscale.md) |
-| **Tailscale IP** | Direct Tailscale IP with self-signed TLS | [docs/transport/tailscale.md](docs/transport/tailscale.md) |
+| **Tailscale** | Private overlay network via MagicDNS + HTTPS (Recommended) | [docs/transport/tailscale.md](docs/transport/tailscale.md) |
 
 One transport is active at a time. When multiple are enabled in `common.toml`, the bridge prompts you to select one at startup.
 
@@ -146,11 +145,6 @@ client_secret = "xxxxx"
 
 [transports.tailscale-serve]
 enabled = true
-
-[transports.tailscale-ip]
-enabled = true
-port    = 8765
-tls     = true
 ```
 
 Enable only the transports you need. `agent_id` and `auth_token` are generated automatically on first run and stay stable across restarts.

@@ -186,10 +186,14 @@ pub fn tailscale_serve_start(port: u16) -> Result<TailscaleServeGuard> {
              Alternatively use --tailscale ip for direct IP binding."
         );
     }
+    // Always expose on port 443 so the Tailscale URL has no port suffix
+    // (e.g. https://hostname.ts.net/ instead of https://hostname.ts.net:8770/).
+    // The local bridge backend continues to run on whatever `port` it chose.
+    const HTTPS_PORT: u16 = 443;
     info!("🔧 Configuring tailscale serve → localhost:{}", port);
     let backend = format!("http://localhost:{}", port);
     let status = Command::new("tailscale")
-        .args(["serve", "--bg", &format!("--https={}", port), &backend])
+        .args(["serve", "--bg", &format!("--https={}", HTTPS_PORT), &backend])
         .status()
         .context("Failed to run 'tailscale serve'")?;
     if !status.success() {
@@ -199,7 +203,7 @@ pub fn tailscale_serve_start(port: u16) -> Result<TailscaleServeGuard> {
             status
         );
     }
-    Ok(TailscaleServeGuard::new(port))
+    Ok(TailscaleServeGuard::new(HTTPS_PORT))
 }
 
 #[cfg(test)]
