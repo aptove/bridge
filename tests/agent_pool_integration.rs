@@ -28,7 +28,7 @@ fn fast_pool(max_agents: usize) -> AgentPool {
 async fn pool_spawn_and_communicate_via_channels() {
     let mut pool = fast_pool(5);
 
-    let (tx, mut rx, _buf, reused, _cached, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
+    let (tx, mut rx, _buf, reused, _cached, _, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
     assert!(!reused);
 
     // Send a message through the stdin channel
@@ -52,7 +52,7 @@ async fn reconnect_to_same_agent_session() {
     let mut pool = fast_pool(5);
 
     // === First connection ===
-    let (tx1, mut rx1, _buf, reused, _cached, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
+    let (tx1, mut rx1, _buf, reused, _cached, _, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
     assert!(!reused);
 
     // Verify echo works
@@ -73,7 +73,7 @@ async fn reconnect_to_same_agent_session() {
     // The broadcast channel drops it since no subscribers.
 
     // === Reconnect ===
-    let (tx2, mut rx2, _buf2, reused2, _cached, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
+    let (tx2, mut rx2, _buf2, reused2, _cached, _, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
     assert!(reused2, "should reuse the same agent process");
     assert_eq!(pool.stats().connected, 1);
 
@@ -100,7 +100,7 @@ async fn reconnect_replays_buffered_messages() {
     pool.buffer_message("tok1", "buf_b".to_string());
 
     // Reconnect — should return buffered messages
-    let (_tx, _rx, buffered, reused, _cached, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
+    let (_tx, _rx, buffered, reused, _cached, _, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
     assert!(reused);
     assert_eq!(buffered, vec!["buf_a", "buf_b"]);
 
@@ -234,7 +234,7 @@ async fn dead_agent_replaced_not_reused() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Next get_or_spawn should detect it's dead and spawn a fresh one
-    let (_tx, _rx, _buf, reused, _cached, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
+    let (_tx, _rx, _buf, reused, _cached, _, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
     assert!(!reused, "dead agent should be replaced with a fresh spawn");
     assert_eq!(pool.stats().total, 1);
 
@@ -248,7 +248,7 @@ async fn cached_init_response_round_trip() {
     let mut pool = fast_pool(5);
 
     // First connection — no cached init
-    let (_tx, _rx, _buf, reused, cached, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
+    let (_tx, _rx, _buf, reused, cached, _, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
     assert!(!reused);
     assert!(cached.is_none());
 
@@ -260,7 +260,7 @@ async fn cached_init_response_round_trip() {
     pool.mark_disconnected("tok1");
 
     // Reconnect — should get the cached init response back
-    let (_tx, _rx, _buf, reused, cached, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
+    let (_tx, _rx, _buf, reused, cached, _, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
     assert!(reused);
     assert_eq!(cached.unwrap(), init_response);
 
@@ -278,7 +278,7 @@ async fn cached_init_survives_multiple_reconnects() {
     // Multiple disconnect/reconnect cycles
     for _ in 0..3 {
         pool.mark_disconnected("tok1");
-        let (_, _, _, reused, cached, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
+        let (_, _, _, reused, cached, _, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
         assert!(reused);
         assert_eq!(cached.unwrap(), init_response);
     }
@@ -293,7 +293,7 @@ async fn cached_session_response_round_trip() {
     let mut pool = fast_pool(5);
 
     // First connection — no cached session
-    let (_tx, _rx, _buf, reused, _cached_init, cached_session) = pool.get_or_spawn("tok1", "cat").await.unwrap();
+    let (_tx, _rx, _buf, reused, _cached_init, cached_session, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
     assert!(!reused);
     assert!(cached_session.is_none());
 
@@ -305,7 +305,7 @@ async fn cached_session_response_round_trip() {
     pool.mark_disconnected("tok1");
 
     // Reconnect — should get the cached session response back
-    let (_tx, _rx, _buf, reused, _cached_init, cached_session) = pool.get_or_spawn("tok1", "cat").await.unwrap();
+    let (_tx, _rx, _buf, reused, _cached_init, cached_session, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
     assert!(reused);
     assert_eq!(cached_session.unwrap(), session_response);
 
@@ -323,7 +323,7 @@ async fn cached_session_survives_multiple_reconnects() {
     // Multiple disconnect/reconnect cycles
     for _ in 0..3 {
         pool.mark_disconnected("tok1");
-        let (_, _, _, reused, _cached_init, cached_session) = pool.get_or_spawn("tok1", "cat").await.unwrap();
+        let (_, _, _, reused, _cached_init, cached_session, _) = pool.get_or_spawn("tok1", "cat").await.unwrap();
         assert!(reused);
         assert_eq!(cached_session.unwrap(), session_response);
     }

@@ -806,7 +806,9 @@ where
     let auth_token_for_callback = Arc::clone(&auth_token);
     let extracted_token = Arc::new(tokio::sync::Mutex::new(String::new()));
     let extracted_token_clone = Arc::clone(&extracted_token);
-    
+    let extracted_client_id = Arc::new(tokio::sync::Mutex::new(String::new()));
+    let extracted_client_id_clone = Arc::clone(&extracted_client_id);
+
     let callback = move |req: &Request, response: Response| -> std::result::Result<Response, ErrorResponse> {
         if let Some(expected_token) = auth_token_for_callback.as_ref() {
             // Check for auth token in headers
@@ -814,11 +816,11 @@ where
                 .get("X-Bridge-Token")
                 .and_then(|v| v.to_str().ok())
                 .map(|t| t.to_string());
-            
+
             let token_valid = header_token.as_deref()
                 .map(|t| t == expected_token)
                 .unwrap_or(false);
-            
+
             // Also check query string as fallback
             let query_token = if !token_valid {
                 req.uri().query()
@@ -830,11 +832,11 @@ where
             } else {
                 None
             };
-            
+
             let query_token_valid = query_token.as_deref()
                 .map(|t| t == expected_token)
                 .unwrap_or(false);
-            
+
             if !token_valid && !query_token_valid {
                 let error_response = tokio_tungstenite::tungstenite::http::Response::builder()
                     .status(StatusCode::UNAUTHORIZED)
@@ -842,7 +844,7 @@ where
                     .unwrap();
                 return Err(error_response);
             }
-            
+
             // Store the validated token for pool routing
             if let Some(t) = header_token.filter(|t| t == expected_token).or(query_token.filter(|t| t == expected_token)) {
                 // We can't await here (sync closure), so use try_lock
@@ -851,6 +853,18 @@ where
                 }
             }
         }
+
+        // Extract X-Client-Id header for multi-device message sync
+        let client_id = req.headers()
+            .get("X-Client-Id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        if let Ok(mut guard) = extracted_client_id_clone.try_lock() {
+            *guard = client_id;
+        }
+
         Ok(response)
     };
     
@@ -871,7 +885,8 @@ where
 
     // Get the token value for pool routing
     let client_token = extracted_token.lock().await.clone();
-    
+    let device_client_id = extracted_client_id.lock().await.clone();
+
     // Decide whether to use pool-based or legacy handling
     if let Some(pool) = agent_pool {
         if client_token.is_empty() {
@@ -879,7 +894,7 @@ where
             handle_websocket_with_handle(ws_stream, agent_handle, push_relay, working_dir).await
         } else {
             if let AgentHandle::Command(ref cmd) = agent_handle {
-                handle_websocket_pooled(ws_stream, cmd.clone(), client_token, pool, push_relay, working_dir.clone(), slash_commands).await
+                handle_websocket_pooled(ws_stream, cmd.clone(), client_token, pool, push_relay, working_dir.clone(), slash_commands, device_client_id).await
             } else {
                 // InProcess handles don't support pooling yet; fall back to per-connection
                 handle_websocket_with_handle(ws_stream, agent_handle, push_relay, working_dir).await
@@ -899,6 +914,7 @@ async fn handle_websocket_pooled<S>(
     push_relay: Option<Arc<PushRelayClient>>,
     _working_dir: PathBuf,
     slash_commands: Arc<Vec<SlashCommandConfig>>,
+    device_client_id: String,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -906,7 +922,7 @@ where
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
     // Get or spawn agent from pool
-    let (ws_to_agent_tx, mut agent_to_ws_rx, buffered, was_reused, cached_init, cached_session) = {
+    let (ws_to_agent_tx, mut agent_to_ws_rx, buffered, was_reused, cached_init, cached_session, broadcast_tx) = {
         let mut pool = pool.write().await;
         pool.get_or_spawn(&token, &agent_command).await?
     };
@@ -990,6 +1006,8 @@ where
 
     // Task 1: WebSocket → Agent (via channel)
     let ws_to_agent_tx_clone = ws_to_agent_tx.clone();
+    let broadcast_tx_for_task1 = broadcast_tx.clone();
+    let device_client_id_for_task1 = device_client_id.clone();
     let push_relay_for_register = push_relay.clone();
     let mut ws_to_agent = tokio::spawn(async move {
         while let Some(msg_result) = ws_receiver.next().await {
@@ -1081,6 +1099,27 @@ where
                                         if let Ok(mut guard) = pending_session_req_id_writer.lock() {
                                             *guard = Some(id.clone());
                                         }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Echo session/prompt to all connected clients for multi-device sync
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if v.get("method").and_then(|m| m.as_str()) == Some("session/prompt") {
+                                if let Some(params) = v.get("params") {
+                                    let prompt_content = params.get("prompt").cloned()
+                                        .unwrap_or(serde_json::Value::Array(vec![]));
+                                    let echo = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "method": "bridge/remoteUserMessage",
+                                        "params": {
+                                            "senderId": device_client_id_for_task1,
+                                            "content": prompt_content
+                                        }
+                                    });
+                                    if let Ok(echo_str) = serde_json::to_string(&echo) {
+                                        let _ = broadcast_tx_for_task1.send(echo_str);
                                     }
                                 }
                             }

@@ -119,12 +119,12 @@ impl AgentPool {
     }
 
     /// Get an existing agent or spawn a new one for the given token.
-    /// Returns (ws_to_agent_tx, agent_to_ws_rx, buffered_messages, was_reused, cached_init_response, cached_session_response)
+    /// Returns (ws_to_agent_tx, agent_to_ws_rx, buffered_messages, was_reused, cached_init_response, cached_session_response, broadcast_tx)
     pub async fn get_or_spawn(
         &mut self,
         token: &str,
         agent_command: &str,
-    ) -> Result<(mpsc::Sender<String>, broadcast::Receiver<String>, Vec<String>, bool, Option<String>, Option<String>)> {
+    ) -> Result<(mpsc::Sender<String>, broadcast::Receiver<String>, Vec<String>, bool, Option<String>, Option<String>, broadcast::Sender<String>)> {
         // Check if we have an existing agent for this token
         if let Some(agent) = self.agents.get_mut(token) {
             if agent.is_alive() {
@@ -141,8 +141,9 @@ impl AgentPool {
                 let rx = agent.subscribe();
                 let cached_init = agent.cached_init_response.clone();
                 let cached_session = agent.cached_session_response.clone();
+                let broadcast_tx = agent.agent_to_ws_tx.clone();
 
-                return Ok((tx, rx, buffered, true, cached_init, cached_session));
+                return Ok((tx, rx, buffered, true, cached_init, cached_session, broadcast_tx));
             } else {
                 info!("Agent process died, removing from pool");
                 self.agents.remove(token);
@@ -181,7 +182,7 @@ impl AgentPool {
         &mut self,
         token: &str,
         agent_command: &str,
-    ) -> Result<(mpsc::Sender<String>, broadcast::Receiver<String>, Vec<String>, bool, Option<String>, Option<String>)> {
+    ) -> Result<(mpsc::Sender<String>, broadcast::Receiver<String>, Vec<String>, bool, Option<String>, Option<String>, broadcast::Sender<String>)> {
         let parts: Vec<&str> = agent_command.split_whitespace().collect();
         if parts.is_empty() {
             anyhow::bail!("Empty agent command");
@@ -290,7 +291,9 @@ impl AgentPool {
 
         self.agents.insert(token.to_string(), pooled);
 
-        Ok((ws_to_agent_tx, agent_to_ws_rx, Vec::new(), false, None, None))
+        let broadcast_tx = self.agents.get(token).unwrap().agent_to_ws_tx.clone();
+
+        Ok((ws_to_agent_tx, agent_to_ws_rx, Vec::new(), false, None, None, broadcast_tx))
     }
 
     /// Mark a client as disconnected. The agent stays alive for idle_timeout.
@@ -506,7 +509,7 @@ mod tests {
         let result = pool.get_or_spawn("token_a", "cat").await;
         assert!(result.is_ok());
 
-        let (_tx, _rx, buffered, was_reused, cached_init, _cached_session) = result.unwrap();
+        let (_tx, _rx, buffered, was_reused, cached_init, _cached_session, _) = result.unwrap();
         assert!(!was_reused, "first spawn should not be reused");
         assert!(buffered.is_empty(), "first spawn should have no buffered msgs");
         assert!(cached_init.is_none(), "first spawn should have no cached init");
@@ -527,7 +530,7 @@ mod tests {
         pool.mark_disconnected("token_a");
 
         // Reconnect
-        let (_tx, _rx, _buf, was_reused, _cached, _) = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        let (_tx, _rx, _buf, was_reused, _cached, _, _) = pool.get_or_spawn("token_a", "cat").await.unwrap();
         assert!(was_reused, "second call should reuse the agent");
         assert_eq!(pool.stats().total, 1);
 
@@ -757,7 +760,7 @@ mod tests {
         pool.buffer_message("token_a", "buffered2".into());
 
         // Reconnect — get_or_spawn returns the buffered messages
-        let (_tx, _rx, buffered, was_reused, _cached, _) = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        let (_tx, _rx, buffered, was_reused, _cached, _, _) = pool.get_or_spawn("token_a", "cat").await.unwrap();
         assert!(was_reused);
         assert_eq!(buffered.len(), 2);
         assert_eq!(buffered[0], "buffered1");
@@ -826,7 +829,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Reconnect should spawn fresh
-        let (_tx, _rx, _buf, was_reused, _cached, _) = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        let (_tx, _rx, _buf, was_reused, _cached, _, _) = pool.get_or_spawn("token_a", "cat").await.unwrap();
         assert!(!was_reused, "dead agent should be replaced, not reused");
 
         pool.shutdown_all().await;
@@ -883,7 +886,7 @@ mod tests {
 
         // Disconnect and reconnect — cached response should be returned
         pool.mark_disconnected("token_a");
-        let (_tx, _rx, _buf, was_reused, cached, _) = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        let (_tx, _rx, _buf, was_reused, cached, _, _) = pool.get_or_spawn("token_a", "cat").await.unwrap();
         assert!(was_reused);
         assert_eq!(cached.as_deref(), Some(fake_init.as_str()));
 
@@ -893,7 +896,7 @@ mod tests {
     #[tokio::test]
     async fn no_cached_init_for_fresh_spawn() {
         let mut pool = AgentPool::new(test_config());
-        let (_tx, _rx, _buf, was_reused, cached, _) = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        let (_tx, _rx, _buf, was_reused, cached, _, _) = pool.get_or_spawn("token_a", "cat").await.unwrap();
         assert!(!was_reused);
         assert!(cached.is_none(), "fresh spawn should have no cached init");
 
@@ -915,7 +918,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Reconnect — dead agent is replaced, so cached init is gone
-        let (_tx, _rx, _buf, was_reused, cached, _) = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        let (_tx, _rx, _buf, was_reused, cached, _, _) = pool.get_or_spawn("token_a", "cat").await.unwrap();
         assert!(!was_reused, "dead agent should be replaced");
         assert!(cached.is_none(), "dead agent's cached init should not carry over");
 
@@ -942,7 +945,7 @@ mod tests {
 
         // Disconnect and reconnect — cached session response should be returned
         pool.mark_disconnected("token_a");
-        let (_tx, _rx, _buf, was_reused, _cached_init, cached_session) = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        let (_tx, _rx, _buf, was_reused, _cached_init, cached_session, _) = pool.get_or_spawn("token_a", "cat").await.unwrap();
         assert!(was_reused);
         assert_eq!(cached_session.as_deref(), Some(fake_session.as_str()));
 
@@ -952,7 +955,7 @@ mod tests {
     #[tokio::test]
     async fn no_cached_session_for_fresh_spawn() {
         let mut pool = AgentPool::new(test_config());
-        let (_tx, _rx, _buf, was_reused, _cached_init, cached_session) = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        let (_tx, _rx, _buf, was_reused, _cached_init, cached_session, _) = pool.get_or_spawn("token_a", "cat").await.unwrap();
         assert!(!was_reused);
         assert!(cached_session.is_none(), "fresh spawn should have no cached session");
 
@@ -974,7 +977,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Reconnect — dead agent is replaced, so cached session is gone
-        let (_tx, _rx, _buf, was_reused, _cached_init, cached_session) = pool.get_or_spawn("token_a", "cat").await.unwrap();
+        let (_tx, _rx, _buf, was_reused, _cached_init, cached_session, _) = pool.get_or_spawn("token_a", "cat").await.unwrap();
         assert!(!was_reused, "dead agent should be replaced");
         assert!(cached_session.is_none(), "dead agent's cached session should not carry over");
 
