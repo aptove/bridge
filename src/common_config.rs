@@ -59,7 +59,7 @@ pub struct CommonConfig {
     pub auth_token: String,
 
     /// Per-transport configuration, keyed by transport name
-    /// (e.g., `"local"`, `"cloudflare"`, `"tailscale-serve"`, `"tailscale-ip"`).
+    /// (e.g., `"local"`, `"cloudflare"`, `"tailscale-serve"`).
     #[serde(default)]
     pub transports: HashMap<String, TransportConfig>,
 
@@ -77,10 +77,10 @@ pub struct TransportConfig {
     #[serde(default)]
     pub enabled: bool,
 
-    /// TCP port to bind (local / tailscale-ip transports).
+    /// TCP port to bind (local transport).
     pub port: Option<u16>,
 
-    /// Enable TLS on this transport (default: true for local and tailscale-ip).
+    /// Enable TLS on this transport (default: true for local).
     pub tls: Option<bool>,
 
     // ---- Cloudflare Zero Trust fields (transport name: "cloudflare") ----

@@ -195,8 +195,7 @@ pub fn display_qr_code(connection_json: &str, transport: &str) -> Result<()> {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     let mode_label = match transport {
         "cloudflare"      => "Cloudflare Zero Trust (internet accessible)",
-        "tailscale-serve" => "Tailscale (HTTPS via MagicDNS)",
-        "tailscale-ip"    => "Tailscale (direct IP)",
+        "tailscale-serve" => "Tailscale (MagicDNS + HTTPS)",
         _                 => "Local Network",
     };
     println!("  Mode: {}", mode_label);

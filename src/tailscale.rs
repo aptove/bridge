@@ -183,7 +183,7 @@ pub fn tailscale_serve_start(port: u16) -> Result<TailscaleServeGuard> {
         anyhow::bail!(
             "tailscale serve mode requires MagicDNS + HTTPS to be enabled on your tailnet.\n\
              Enable HTTPS in the Tailscale admin console: https://tailscale.com/kb/1153/enabling-https\n\
-             Alternatively use --tailscale ip for direct IP binding."
+             Enable HTTPS in the Tailscale admin console: https://tailscale.com/kb/1153/enabling-https"
         );
     }
     // Always expose on port 443 so the Tailscale URL has no port suffix
