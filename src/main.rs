@@ -890,6 +890,19 @@ async fn main() -> Result<()> {
             info!("📋 {} slash command(s) configured for injection", slash_commands.len());
             bridge = bridge.with_slash_commands(slash_commands);
 
+            // Create MEMORY.md if it doesn't exist and configure the bridge to use it.
+            let memory_path = config_dir.join("MEMORY.md");
+            if !memory_path.exists() {
+                if let Err(e) = std::fs::write(&memory_path, "") {
+                    warn!("⚠️  Could not create MEMORY.md: {}", e);
+                } else {
+                    info!("🧠 Created MEMORY.md at {}", memory_path.display());
+                }
+            } else {
+                info!("🧠 Using existing MEMORY.md at {}", memory_path.display());
+            }
+            bridge = bridge.with_memory_path(memory_path);
+
             // _ts_guard, _cf_runner, and _reaper live until end of this block (bridge lifetime).
             match bridge.start().await {
                 Ok(()) => info!("Bridge exited cleanly"),

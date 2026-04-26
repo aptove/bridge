@@ -112,6 +112,9 @@ pub struct StdioBridge {
     /// session/new or session/load, for agents that don't send the notification
     /// themselves (e.g. Copilot CLI).
     slash_commands: Arc<Vec<SlashCommandConfig>>,
+    /// Path to MEMORY.md — loaded into context on new sessions and appended
+    /// to by `bridge/appendMemory` notifications from clients.
+    memory_path: Option<PathBuf>,
 }
 
 impl StdioBridge {
@@ -131,7 +134,14 @@ impl StdioBridge {
             external_tls: false,
             working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             slash_commands: Arc::new(Vec::new()),
+            memory_path: None,
         }
+    }
+
+    /// Set the path to MEMORY.md for persistent memory injection.
+    pub fn with_memory_path(mut self, path: PathBuf) -> Self {
+        self.memory_path = Some(path);
+        self
     }
 
     /// Set slash commands to inject after session creation for agents that
@@ -281,6 +291,7 @@ impl StdioBridge {
                     let client_ip_str = addr.ip().to_string();
                     let working_dir = self.working_dir.clone();
                     let slash_commands = Arc::clone(&self.slash_commands);
+                    let memory_path = self.memory_path.clone();
 
                     tokio::spawn(async move {
                         // Register connection
@@ -290,7 +301,7 @@ impl StdioBridge {
                             // TLS connection
                             match tls.acceptor.accept(stream).await {
                                 Ok(tls_stream) => {
-                                    handle_connection_generic(tls_stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay, webhook_resolver, webhook_rate_limiter, client_ip_str, working_dir, slash_commands).await
+                                    handle_connection_generic(tls_stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay, webhook_resolver, webhook_rate_limiter, client_ip_str, working_dir, slash_commands, memory_path).await
                                 }
                                 Err(e) => {
                                     warn!("🚫 TLS handshake failed: {}", e);
@@ -299,7 +310,7 @@ impl StdioBridge {
                             }
                         } else {
                             // Plain TCP connection
-                            handle_connection_generic(stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay, webhook_resolver, webhook_rate_limiter, client_ip_str, working_dir, slash_commands).await
+                            handle_connection_generic(stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay, webhook_resolver, webhook_rate_limiter, client_ip_str, working_dir, slash_commands, memory_path).await
                         };
 
                         // Always remove connection when done
@@ -335,6 +346,7 @@ async fn handle_connection_generic<S>(
     client_ip: String,
     working_dir: PathBuf,
     slash_commands: Arc<Vec<SlashCommandConfig>>,
+    memory_path: Option<PathBuf>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -389,7 +401,7 @@ where
     let prefixed_stream = PrefixedStream::new(request_bytes, stream);
     
     // Continue with WebSocket handling
-    handle_websocket_connection(prefixed_stream, agent_handle, auth_token, agent_pool, push_relay, working_dir, slash_commands).await
+    handle_websocket_connection(prefixed_stream, agent_handle, auth_token, agent_pool, push_relay, working_dir, slash_commands, memory_path).await
 }
 
 /// Handle a pairing request - validate the code and return connection details
@@ -797,7 +809,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<S> {
 }
 
 /// Handle WebSocket connection after initial HTTP parsing
-async fn handle_websocket_connection<S>(stream: S, agent_handle: AgentHandle, auth_token: Arc<Option<String>>, agent_pool: Option<Arc<tokio::sync::RwLock<AgentPool>>>, push_relay: Option<Arc<PushRelayClient>>, working_dir: PathBuf, slash_commands: Arc<Vec<SlashCommandConfig>>) -> Result<()>
+async fn handle_websocket_connection<S>(stream: S, agent_handle: AgentHandle, auth_token: Arc<Option<String>>, agent_pool: Option<Arc<tokio::sync::RwLock<AgentPool>>>, push_relay: Option<Arc<PushRelayClient>>, working_dir: PathBuf, slash_commands: Arc<Vec<SlashCommandConfig>>, memory_path: Option<PathBuf>) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -894,7 +906,7 @@ where
             handle_websocket_with_handle(ws_stream, agent_handle, push_relay, working_dir).await
         } else {
             if let AgentHandle::Command(ref cmd) = agent_handle {
-                handle_websocket_pooled(ws_stream, cmd.clone(), client_token, pool, push_relay, working_dir.clone(), slash_commands, device_client_id).await
+                handle_websocket_pooled(ws_stream, cmd.clone(), client_token, pool, push_relay, working_dir.clone(), slash_commands, device_client_id, memory_path).await
             } else {
                 // InProcess handles don't support pooling yet; fall back to per-connection
                 handle_websocket_with_handle(ws_stream, agent_handle, push_relay, working_dir).await
@@ -915,6 +927,7 @@ async fn handle_websocket_pooled<S>(
     _working_dir: PathBuf,
     slash_commands: Arc<Vec<SlashCommandConfig>>,
     device_client_id: String,
+    memory_path: Option<PathBuf>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -1009,13 +1022,17 @@ where
     let broadcast_tx_for_task1 = broadcast_tx.clone();
     let device_client_id_for_task1 = device_client_id.clone();
     let push_relay_for_register = push_relay.clone();
+    let memory_path_for_task1 = memory_path.clone();
     let mut ws_to_agent = tokio::spawn(async move {
+        // True once memory has been prepended to the first session/prompt of this session.
+        // Only applies to fresh (not reused) agent sessions.
+        let mut memory_injected = false;
         while let Some(msg_result) = ws_receiver.next().await {
             match msg_result {
                 Ok(msg) => {
                     if msg.is_text() || msg.is_binary() {
                         let data = msg.into_data();
-                        let text = String::from_utf8_lossy(&data).to_string();
+                        let mut text = String::from_utf8_lossy(&data).to_string();
                         debug!("📥 Received from Mobile ({} bytes): {}", text.len(),
                             text.chars().take(200).collect::<String>());
 
@@ -1061,6 +1078,34 @@ where
                                 }
                             }
                         }
+
+                        // Handle bridge/appendMemory — append text to MEMORY.md
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if v.get("method").and_then(|m| m.as_str()) == Some("bridge/appendMemory") {
+                                if let Some(entry_text) = v.pointer("/params/text").and_then(|t| t.as_str()) {
+                                    if let Some(ref path) = memory_path_for_task1 {
+                                        let entry = format!("\n{}\n", entry_text.trim());
+                                        match tokio::fs::OpenOptions::new()
+                                            .create(true)
+                                            .append(true)
+                                            .open(path)
+                                            .await
+                                        {
+                                            Ok(mut f) => {
+                                                use tokio::io::AsyncWriteExt;
+                                                if let Err(e) = f.write_all(entry.as_bytes()).await {
+                                                    error!("Failed to write to MEMORY.md: {}", e);
+                                                } else {
+                                                    info!("🧠 Appended memory entry ({} bytes)", entry.len());
+                                                }
+                                            }
+                                            Err(e) => error!("Failed to open MEMORY.md: {}", e),
+                                        }
+                                    }
+                                }
+                                continue; // don't forward to agent
+                            }
+                        }
                         
                         // On fresh agents, intercept session/load and return a
                         // synthetic error. A just-spawned agent has no sessions to
@@ -1100,6 +1145,33 @@ where
                                             *guard = Some(id.clone());
                                         }
                                     }
+                                }
+                            }
+                        }
+
+                        // Inject MEMORY.md content into the first session/prompt of a fresh session
+                        if needs_init_capture && !memory_injected {
+                            if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) {
+                                if v.get("method").and_then(|m| m.as_str()) == Some("session/prompt") {
+                                    if let Some(ref path) = memory_path_for_task1 {
+                                        if let Ok(contents) = tokio::fs::read_to_string(path).await {
+                                            let trimmed = contents.trim();
+                                            if !trimmed.is_empty() {
+                                                let memory_block = serde_json::json!({
+                                                    "type": "text",
+                                                    "text": format!("<memory>\n{}\n</memory>\n\n", trimmed)
+                                                });
+                                                if let Some(prompt_arr) = v.pointer_mut("/params/prompt") {
+                                                    if let Some(arr) = prompt_arr.as_array_mut() {
+                                                        arr.insert(0, memory_block);
+                                                        info!("🧠 Injected memory context into session/prompt ({} bytes)", trimmed.len());
+                                                    }
+                                                }
+                                                text = serde_json::to_string(&v).unwrap_or(text);
+                                            }
+                                        }
+                                    }
+                                    memory_injected = true;
                                 }
                             }
                         }
