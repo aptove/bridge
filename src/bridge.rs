@@ -1017,12 +1017,26 @@ where
     let pong_received = Arc::new(AtomicBool::new(true));
     let pong_received_for_receiver = Arc::clone(&pong_received);
 
+    // Session ID shared between Task 1 (memory update sender) and Task 2 (session capturer).
+    // Pre-populated from cached session for reconnects; Task 2 fills it on fresh sessions.
+    let current_session_id: Arc<std::sync::Mutex<Option<String>>> = Arc::new(
+        std::sync::Mutex::new(
+            cached_session.as_ref().and_then(|s| extract_session_id_from_response(s))
+        )
+    );
+    // When Task 1 sends a silent memory-update prompt, it records the request id here.
+    // Task 2 drops all agent output until it sees a response with that id, then clears it.
+    let suppress_response_id: Arc<std::sync::Mutex<Option<String>>> =
+        Arc::new(std::sync::Mutex::new(None));
+
     // Task 1: WebSocket → Agent (via channel)
     let ws_to_agent_tx_clone = ws_to_agent_tx.clone();
     let broadcast_tx_for_task1 = broadcast_tx.clone();
     let device_client_id_for_task1 = device_client_id.clone();
     let push_relay_for_register = push_relay.clone();
     let memory_path_for_task1 = memory_path.clone();
+    let current_session_id_task1 = Arc::clone(&current_session_id);
+    let suppress_response_id_task1 = Arc::clone(&suppress_response_id);
     let mut ws_to_agent = tokio::spawn(async move {
         // True once memory has been prepended to the first session/prompt of this session.
         // Only applies to fresh (not reused) agent sessions.
@@ -1079,12 +1093,14 @@ where
                             }
                         }
 
-                        // Handle bridge/appendMemory — append text to MEMORY.md
+                        // Handle bridge/appendMemory — append text to MEMORY.md, then
+                        // send a silent session/prompt so the agent updates its context.
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                             if v.get("method").and_then(|m| m.as_str()) == Some("bridge/appendMemory") {
                                 if let Some(entry_text) = v.pointer("/params/text").and_then(|t| t.as_str()) {
                                     if let Some(ref path) = memory_path_for_task1 {
                                         let entry = format!("\n{}\n", entry_text.trim());
+                                        let mut write_ok = false;
                                         match tokio::fs::OpenOptions::new()
                                             .create(true)
                                             .append(true)
@@ -1097,13 +1113,60 @@ where
                                                     error!("Failed to write to MEMORY.md: {}", e);
                                                 } else {
                                                     info!("🧠 Appended memory entry ({} bytes)", entry.len());
+                                                    write_ok = true;
                                                 }
                                             }
                                             Err(e) => error!("Failed to open MEMORY.md: {}", e),
                                         }
+
+                                        // After a successful write, push the full updated memory
+                                        // into the agent as a silent context-update prompt.
+                                        if write_ok {
+                                            let session_id_opt = current_session_id_task1
+                                                .lock().ok().and_then(|g| g.clone());
+                                            if let Some(session_id) = session_id_opt {
+                                                if let Ok(contents) = tokio::fs::read_to_string(path).await {
+                                                    let trimmed = contents.trim().to_string();
+                                                    if !trimmed.is_empty() {
+                                                        let req_id = format!(
+                                                            "__memory_update_{}",
+                                                            uuid::Uuid::new_v4().simple()
+                                                        );
+                                                        let prompt_msg = serde_json::json!({
+                                                            "jsonrpc": "2.0",
+                                                            "id": req_id,
+                                                            "method": "session/prompt",
+                                                            "params": {
+                                                                "sessionId": session_id,
+                                                                "prompt": [{
+                                                                    "type": "text",
+                                                                    "text": format!(
+                                                                        "[Memory Context Update] Your persistent memory has been updated. Here is the complete current memory:\n\n<memory>\n{}\n</memory>\n\nAcknowledge with just \"✓\".",
+                                                                        trimmed
+                                                                    )
+                                                                }]
+                                                            }
+                                                        });
+                                                        // Arm suppression before sending so Task 2
+                                                        // immediately starts dropping responses.
+                                                        if let Ok(mut guard) = suppress_response_id_task1.lock() {
+                                                            *guard = Some(req_id);
+                                                        }
+                                                        let msg_str = serde_json::to_string(&prompt_msg)
+                                                            .unwrap_or_default();
+                                                        if !msg_str.is_empty() {
+                                                            info!("🧠 Sending silent memory context update to agent (session={})", session_id);
+                                                            let _ = ws_to_agent_tx_clone.send(msg_str).await;
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                info!("🧠 Memory saved; skipping agent update (no active session yet)");
+                                            }
+                                        }
                                     }
                                 }
-                                continue; // don't forward to agent
+                                continue; // don't forward original notification to agent
                             }
                         }
                         
@@ -1223,6 +1286,8 @@ where
     let shutdown_tx_clone = shutdown_tx.clone();
     let token_for_buffer = token.clone();
     let pool_for_buffer = Arc::clone(&pool);
+    let current_session_id_task2 = Arc::clone(&current_session_id);
+    let suppress_response_id_task2 = Arc::clone(&suppress_response_id);
     let agent_to_ws = tokio::spawn(async move {
         let mut init_captured = false;
         let mut session_captured = false;
@@ -1277,6 +1342,12 @@ where
                             let mut pool = pool_for_capture.write().await;
                             pool.cache_session_response(&token_for_capture, line.clone());
                             session_captured = true;
+                            // Store session ID so Task 1 can send silent memory-update prompts.
+                            if let Some(sid) = extract_session_id_from_response(&line) {
+                                if let Ok(mut guard) = current_session_id_task2.lock() {
+                                    *guard = Some(sid);
+                                }
+                            }
                         }
                     }
 
@@ -1290,6 +1361,22 @@ where
                                 let mut pool = pool_for_capture.write().await;
                                 pool.clear_session_response(&token_for_capture);
                             }
+                        }
+                    }
+
+                    // Drop this message if it belongs to a silent memory-update prompt.
+                    // Task 1 arms `suppress_response_id` before sending the prompt; we clear
+                    // it once we see the final JSON-RPC response (has a matching `id` field).
+                    {
+                        let mut sup = suppress_response_id_task2.lock().unwrap();
+                        if sup.is_some() {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                                if v.get("id").and_then(|i| i.as_str()) == sup.as_deref() {
+                                    *sup = None; // final response received — stop suppressing
+                                }
+                            }
+                            debug!("🔇 Suppressed silent memory-update agent response");
+                            continue;
                         }
                     }
 
