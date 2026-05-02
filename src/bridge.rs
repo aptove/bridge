@@ -1301,6 +1301,10 @@ where
     let agent_to_ws = tokio::spawn(async move {
         let mut init_captured = false;
         let mut session_captured = false;
+        // Accumulates plain text extracted from suppressed memory-update responses.
+        // Streaming agents split content across multiple messages, so we buffer
+        // across messages and search the combined text for <merged_memory> tags.
+        let mut suppressed_text_buf = String::new();
         // Send a Ping every 30 s; if no Pong arrives before the next Ping the
         // connection is treated as dead and closed (frees the rate-limiter slot).
         let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
@@ -1377,8 +1381,10 @@ where
                     // Drop this message if it belongs to a silent memory-update prompt.
                     // Task 1 arms `suppress_response_id` before sending the prompt; we clear
                     // it once we see the final JSON-RPC response (has a matching `id` field).
-                    // We scan EVERY suppressed message (including streaming notifications) for
-                    // <merged_memory> content so we capture it regardless of agent streaming style.
+                    //
+                    // Streaming agents split content across many messages, so we accumulate
+                    // ALL plain-text extracted from suppressed messages into suppressed_text_buf
+                    // and search the COMBINED buffer for <merged_memory> tags.
                     {
                         // Determine suppression state without holding the lock across an await.
                         let (is_suppressed, is_final) = {
@@ -1398,18 +1404,25 @@ where
                             }
                         }; // lock dropped here
                         if is_suppressed {
-                            // Try to extract merged memory from every suppressed message.
-                            // Streaming agents send text in notifications before the final response.
-                            if let Some(ref path) = memory_path_for_task2 {
-                                if let Some(merged) = extract_merged_memory(&line) {
+                            // Accumulate text from this chunk into the buffer.
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                                collect_all_text_into(&v, &mut suppressed_text_buf);
+                            }
+                            // Check if the buffer now contains a complete <merged_memory> block.
+                            if let Some(merged) = extract_merged_memory_from_text(&suppressed_text_buf) {
+                                suppressed_text_buf.clear();
+                                if let Some(ref path) = memory_path_for_task2 {
                                     let content = format!("{}\n", merged.trim());
                                     match tokio::fs::write(path, content.as_bytes()).await {
                                         Ok(_) => info!("🧠 MEMORY.md rewritten with merged content ({} bytes)", content.len()),
                                         Err(e) => error!("Failed to rewrite MEMORY.md: {}", e),
                                     }
-                                } else if is_final {
-                                    debug!("🧠 Final memory-update response had no <merged_memory> block — file unchanged");
                                 }
+                            } else if is_final {
+                                // Final response arrived but no <merged_memory> found — give up.
+                                debug!("🧠 Memory-update finished with no <merged_memory> block (buf={} bytes) — file unchanged",
+                                    suppressed_text_buf.len());
+                                suppressed_text_buf.clear();
                             }
                             debug!("🔇 Suppressed silent memory-update agent response (is_final={})", is_final);
                             continue;
@@ -1545,41 +1558,32 @@ fn is_create_session_response(msg: &str) -> bool {
     }
 }
 
-/// Extract the content inside `<merged_memory>...</merged_memory>` tags from an agent
-/// response JSON string. Walks the full value tree to find the text field that contains
-/// the tags, then returns the inner text (JSON-unescaped via serde).
-fn extract_merged_memory(json_str: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
-    let text = find_text_containing(&v, "<merged_memory>")?;
+/// Recursively collect all string leaf values from a JSON value into `buf`.
+/// Used to accumulate streaming text chunks before searching for tags.
+fn collect_all_text_into(v: &serde_json::Value, buf: &mut String) {
+    match v {
+        serde_json::Value::String(s) => buf.push_str(s),
+        serde_json::Value::Object(map) => {
+            for val in map.values() {
+                collect_all_text_into(val, buf);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                collect_all_text_into(item, buf);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Extract the content inside `<merged_memory>...</merged_memory>` tags from plain text.
+fn extract_merged_memory_from_text(text: &str) -> Option<String> {
     let start_tag = "<merged_memory>";
     let end_tag = "</merged_memory>";
     let start = text.find(start_tag)? + start_tag.len();
     let end = text[start..].find(end_tag)? + start;
     Some(text[start..end].to_string())
-}
-
-/// Recursively walk a JSON value tree and return the first string that contains `needle`.
-fn find_text_containing(v: &serde_json::Value, needle: &str) -> Option<String> {
-    match v {
-        serde_json::Value::String(s) if s.contains(needle) => Some(s.clone()),
-        serde_json::Value::Object(map) => {
-            for val in map.values() {
-                if let Some(s) = find_text_containing(val, needle) {
-                    return Some(s);
-                }
-            }
-            None
-        }
-        serde_json::Value::Array(arr) => {
-            for item in arr {
-                if let Some(s) = find_text_containing(item, needle) {
-                    return Some(s);
-                }
-            }
-            None
-        }
-        _ => None,
-    }
 }
 
 /// Extract the `sessionId` string from a JSON-RPC session/new response.
