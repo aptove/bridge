@@ -1149,7 +1149,7 @@ where
                                                                 "prompt": [{
                                                                     "type": "text",
                                                                     "text": format!(
-                                                                        "[Memory Update] A new entry has been added to your persistent memory. The full memory file (including the new entry) is below. Consolidate it by merging or replacing any conflicting or duplicate information, keeping the most recent values. Reply with the complete consolidated memory wrapped in <merged_memory>...</merged_memory> tags and nothing else.\n\n<memory>\n{}\n</memory>",
+                                                                        "[SYSTEM: Memory File Update]\nYour persistent memory file has been updated. The full content (including the latest entry at the bottom) is shown below. The latest entry OVERRIDES any earlier conflicting information on the same topic.\n\nYour task: produce the consolidated memory with conflicts resolved (keep only the newest value for each topic). You MUST respond with ONLY the consolidated content wrapped in exactly these XML tags — no other text before or after:\n\n<merged_memory>\n(consolidated content here)\n</merged_memory>\n\nCurrent file:\n<memory>\n{}\n</memory>",
                                                                         trimmed
                                                                     )
                                                                 }]
@@ -1404,9 +1404,9 @@ where
                             }
                         }; // lock dropped here
                         if is_suppressed {
-                            // Accumulate text from this chunk into the buffer.
+                            // Accumulate text from ACP content blocks in this chunk.
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                                collect_all_text_into(&v, &mut suppressed_text_buf);
+                                collect_content_text_into(&v, &mut suppressed_text_buf);
                             }
                             // Check if the buffer now contains a complete <merged_memory> block.
                             if let Some(merged) = extract_merged_memory_from_text(&suppressed_text_buf) {
@@ -1420,8 +1420,9 @@ where
                                 }
                             } else if is_final {
                                 // Final response arrived but no <merged_memory> found — give up.
-                                debug!("🧠 Memory-update finished with no <merged_memory> block (buf={} bytes) — file unchanged",
-                                    suppressed_text_buf.len());
+                                warn!("🧠 Memory-update finished with no <merged_memory> block — file unchanged. Agent replied ({} bytes): {}",
+                                    suppressed_text_buf.len(),
+                                    suppressed_text_buf.chars().take(500).collect::<String>());
                                 suppressed_text_buf.clear();
                             }
                             debug!("🔇 Suppressed silent memory-update agent response (is_final={})", is_final);
@@ -1558,22 +1559,30 @@ fn is_create_session_response(msg: &str) -> bool {
     }
 }
 
-/// Recursively collect all string leaf values from a JSON value into `buf`.
-/// Used to accumulate streaming text chunks before searching for tags.
-fn collect_all_text_into(v: &serde_json::Value, buf: &mut String) {
+/// Recursively extract text from ACP content blocks (`{"type":"text","text":"..."}`)
+/// within a JSON value. Only collects the actual message text, ignoring protocol
+/// fields like method names, session IDs, and "jsonrpc" version strings.
+fn collect_content_text_into(v: &serde_json::Value, buf: &mut String) {
     match v {
-        serde_json::Value::String(s) => buf.push_str(s),
         serde_json::Value::Object(map) => {
+            // ACP content block: {"type": "text", "text": "actual content"}
+            if map.get("type").and_then(|t| t.as_str()) == Some("text") {
+                if let Some(text) = map.get("text").and_then(|t| t.as_str()) {
+                    buf.push_str(text);
+                    return; // don't recurse further into this block
+                }
+            }
+            // Otherwise recurse into values to find nested content blocks
             for val in map.values() {
-                collect_all_text_into(val, buf);
+                collect_content_text_into(val, buf);
             }
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                collect_all_text_into(item, buf);
+                collect_content_text_into(item, buf);
             }
         }
-        _ => {}
+        _ => {} // Ignore bare strings — only collect from structured content blocks
     }
 }
 
