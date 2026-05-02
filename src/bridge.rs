@@ -954,6 +954,10 @@ where
         }
     }
     
+    // Memory injection: start as false (inject on first session/prompt).
+    // Set to true only when reusing an agent with a session/load (resume) — memory already in context.
+    let mut initial_memory_injected = false;
+
     // If reconnecting and we have a cached initialize response, intercept the
     // client's `initialize` request and reply with the cached response.
     // This prevents the agent from being re-initialized and losing its state.
@@ -976,14 +980,17 @@ where
         // Also intercept session requests (session/new or session/load) to reuse the same session ID
         if let Some(ref cached) = cached_session {
             info!("🔄 Intercepting session request for session resumption");
-            let session_handled = handle_create_session_intercept(
+            let (session_handled, reuse_was_new_session) = handle_create_session_intercept(
                 &mut ws_receiver, &mut ws_sender, cached, &slash_commands
             ).await;
             if session_handled {
-                info!("✅ Session request intercepted, reusing existing session");
+                info!("✅ Session request intercepted, reusing existing session (was_new={})", reuse_was_new_session);
             } else {
                 warn!("⚠️  Next message was not a session request, proceeding normally");
             }
+            // Re-inject memory when the client explicitly reset (session/new).
+            // Skip re-injection on session/load (resume) — memory is already in context.
+            initial_memory_injected = !reuse_was_new_session;
         } else {
             debug!("No cached session response, first connection will capture it");
         }
@@ -1038,9 +1045,10 @@ where
     let current_session_id_task1 = Arc::clone(&current_session_id);
     let suppress_response_id_task1 = Arc::clone(&suppress_response_id);
     let mut ws_to_agent = tokio::spawn(async move {
-        // True once memory has been prepended to the first session/prompt of this session.
-        // Only applies to fresh (not reused) agent sessions.
-        let mut memory_injected = false;
+        // True once memory has been prepended to the first session/prompt of this connection.
+        // Pre-set to true for reused agents resuming an existing session (session/load) since
+        // memory is already in context. False for fresh agents or session/new resets.
+        let mut memory_injected = initial_memory_injected;
         while let Some(msg_result) = ws_receiver.next().await {
             match msg_result {
                 Ok(msg) => {
@@ -1141,7 +1149,7 @@ where
                                                                 "prompt": [{
                                                                     "type": "text",
                                                                     "text": format!(
-                                                                        "[Memory Context Update] Your persistent memory has been updated. Here is the complete current memory:\n\n<memory>\n{}\n</memory>\n\nAcknowledge with just \"✓\".",
+                                                                        "[Memory Update] A new entry has been added to your persistent memory. The full memory file (including the new entry) is below. Consolidate it by merging or replacing any conflicting or duplicate information, keeping the most recent values. Reply with the complete consolidated memory wrapped in <merged_memory>...</merged_memory> tags and nothing else.\n\n<memory>\n{}\n</memory>",
                                                                         trimmed
                                                                     )
                                                                 }]
@@ -1212,8 +1220,9 @@ where
                             }
                         }
 
-                        // Inject MEMORY.md content into the first session/prompt of a fresh session
-                        if needs_init_capture && !memory_injected {
+                        // Inject MEMORY.md content into the first session/prompt.
+                        // Runs for fresh agents and for reused agents after session/new (clear session).
+                        if !memory_injected {
                             if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) {
                                 if v.get("method").and_then(|m| m.as_str()) == Some("session/prompt") {
                                     if let Some(ref path) = memory_path_for_task1 {
@@ -1288,6 +1297,7 @@ where
     let pool_for_buffer = Arc::clone(&pool);
     let current_session_id_task2 = Arc::clone(&current_session_id);
     let suppress_response_id_task2 = Arc::clone(&suppress_response_id);
+    let memory_path_for_task2 = memory_path.clone();
     let agent_to_ws = tokio::spawn(async move {
         let mut init_captured = false;
         let mut session_captured = false;
@@ -1367,12 +1377,37 @@ where
                     // Drop this message if it belongs to a silent memory-update prompt.
                     // Task 1 arms `suppress_response_id` before sending the prompt; we clear
                     // it once we see the final JSON-RPC response (has a matching `id` field).
+                    // On the final response, extract <merged_memory> content and overwrite
+                    // MEMORY.md so conflicting/duplicate entries are resolved.
                     {
-                        let mut sup = suppress_response_id_task2.lock().unwrap();
-                        if sup.is_some() {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                                if v.get("id").and_then(|i| i.as_str()) == sup.as_deref() {
+                        // Determine suppression state without holding the lock across an await.
+                        let (is_suppressed, is_final) = {
+                            let mut sup = suppress_response_id_task2.lock().unwrap();
+                            if sup.is_some() {
+                                let final_resp = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                                    v.get("id").and_then(|i| i.as_str()) == sup.as_deref()
+                                } else {
+                                    false
+                                };
+                                if final_resp {
                                     *sup = None; // final response received — stop suppressing
+                                }
+                                (true, final_resp)
+                            } else {
+                                (false, false)
+                            }
+                        }; // lock dropped here
+                        if is_suppressed {
+                            if is_final {
+                                // Extract the merged memory the agent produced and write it back.
+                                if let Some(ref path) = memory_path_for_task2 {
+                                    if let Some(merged) = extract_merged_memory(&line) {
+                                        let content = format!("{}\n", merged.trim());
+                                        match tokio::fs::write(path, content.as_bytes()).await {
+                                            Ok(_) => info!("🧠 MEMORY.md rewritten with merged content ({} bytes)", content.len()),
+                                            Err(e) => error!("Failed to rewrite MEMORY.md: {}", e),
+                                        }
+                                    }
                                 }
                             }
                             debug!("🔇 Suppressed silent memory-update agent response");
@@ -1509,6 +1544,43 @@ fn is_create_session_response(msg: &str) -> bool {
     }
 }
 
+/// Extract the content inside `<merged_memory>...</merged_memory>` tags from an agent
+/// response JSON string. Walks the full value tree to find the text field that contains
+/// the tags, then returns the inner text (JSON-unescaped via serde).
+fn extract_merged_memory(json_str: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let text = find_text_containing(&v, "<merged_memory>")?;
+    let start_tag = "<merged_memory>";
+    let end_tag = "</merged_memory>";
+    let start = text.find(start_tag)? + start_tag.len();
+    let end = text[start..].find(end_tag)? + start;
+    Some(text[start..end].to_string())
+}
+
+/// Recursively walk a JSON value tree and return the first string that contains `needle`.
+fn find_text_containing(v: &serde_json::Value, needle: &str) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) if s.contains(needle) => Some(s.clone()),
+        serde_json::Value::Object(map) => {
+            for val in map.values() {
+                if let Some(s) = find_text_containing(val, needle) {
+                    return Some(s);
+                }
+            }
+            None
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                if let Some(s) = find_text_containing(item, needle) {
+                    return Some(s);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Extract the `sessionId` string from a JSON-RPC session/new response.
 fn extract_session_id_from_response(response: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(response)
@@ -1559,13 +1631,15 @@ fn build_available_commands_notification(
 }
 
 /// Intercept the client's `createSession` request and reply with a cached response.
-/// Returns true if a createSession was intercepted, false otherwise.
+/// Returns (intercepted, was_new_session):
+///   intercepted      = true if a session request was handled
+///   was_new_session  = true if the client sent session/new (reset), false for session/load (resume)
 async fn handle_create_session_intercept<S>(
     ws_receiver: &mut futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<S>>,
     ws_sender: &mut futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<S>, Message>,
     cached_response: &str,
     slash_commands: &[SlashCommandConfig],
-) -> bool
+) -> (bool, bool)
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -1585,32 +1659,32 @@ where
             Ok(Some(Ok(msg))) if msg.is_text() || msg.is_binary() => {
                 String::from_utf8_lossy(&msg.into_data()).to_string()
             }
-            _ => return false,
+            _ => return (false, false),
         };
-        
+
         request = match serde_json::from_str(&msg) {
             Ok(v) => v,
-            Err(_) => return false,
+            Err(_) => return (false, false),
         };
-        
+
         let method = request.get("method").and_then(|m| m.as_str());
-        
+
         // Accept both session/new (new session) and session/load (resume session)
         if method == Some("session/new") || method == Some("session/load") {
             break; // found it
         }
-        
+
         // If it's a notification (has method but no id), skip it
         if method.is_some() && request.get("id").is_none() {
             info!("📨 Skipping notification during session intercept: {:?}", method);
             skipped += 1;
             if skipped >= max_skip {
                 warn!("⚠️  Too many notifications before session request, giving up");
-                return false;
+                return (false, false);
             }
             continue;
         }
-        
+
         // If it's an initialize request, respond with a minimal ACP initialize response
         // and continue looking for session/new. This happens when cached_init was None
         // (e.g., agent's initialize response format wasn't recognized on first connection).
@@ -1632,51 +1706,53 @@ where
                 let resp_str = serde_json::to_string(&init_response).unwrap_or_default();
                 if let Err(e) = ws_sender.send(Message::Text(resp_str.into())).await {
                     error!("Failed to send synthetic initialize response: {}", e);
-                    return false;
+                    return (false, false);
                 }
                 skipped += 1;
                 if skipped >= max_skip {
                     warn!("⚠️  Too many messages before session request, giving up");
-                    return false;
+                    return (false, false);
                 }
                 continue;
             }
         }
-        
+
         // It's some other request, not a session request — can't intercept
-        warn!("⚠️  Message is not session/new or session/load (method={:?}, has_id={}, raw={}), cannot intercept", 
-            method, request.get("id").is_some(), 
+        warn!("⚠️  Message is not session/new or session/load (method={:?}, has_id={}, raw={}), cannot intercept",
+            method, request.get("id").is_some(),
             msg.chars().take(200).collect::<String>());
-        return false;
+        return (false, false);
     }
-    
+
+    let was_new = request.get("method").and_then(|m| m.as_str()) == Some("session/new");
+
     // Extract the request ID so we can match it in the response
     let request_id = match request.get("id") {
         Some(id) => id.clone(),
-        None => return false,
+        None => return (false, false),
     };
-    
+
     let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("unknown");
     info!("🔄 Intercepting {} request (id={})", method, request_id);
-    
+
     // Parse the cached response and replace its "id" with the new request's "id"
     let mut cached: serde_json::Value = match serde_json::from_str(cached_response) {
         Ok(v) => v,
         Err(e) => {
             error!("Failed to parse cached session response: {}", e);
-            return false;
+            return (false, false);
         }
     };
-    
+
     cached["id"] = request_id;
-    
+
     let response_str = serde_json::to_string(&cached).unwrap_or_default();
     debug!("🔄 Sending cached session response ({} bytes): {}", response_str.len(),
         response_str.chars().take(200).collect::<String>());
-    
+
     if let Err(e) = ws_sender.send(Message::Text(response_str.into())).await {
         error!("Failed to send cached session response: {}", e);
-        return false;
+        return (false, false);
     }
 
     // Inject available_commands_update so clients get the command picker
@@ -1689,7 +1765,7 @@ where
         }
     }
 
-    true
+    (true, was_new)
 }
 
 /// Intercept the client's `initialize` request and reply with a cached response.
