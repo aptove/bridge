@@ -1377,8 +1377,8 @@ where
                     // Drop this message if it belongs to a silent memory-update prompt.
                     // Task 1 arms `suppress_response_id` before sending the prompt; we clear
                     // it once we see the final JSON-RPC response (has a matching `id` field).
-                    // On the final response, extract <merged_memory> content and overwrite
-                    // MEMORY.md so conflicting/duplicate entries are resolved.
+                    // We scan EVERY suppressed message (including streaming notifications) for
+                    // <merged_memory> content so we capture it regardless of agent streaming style.
                     {
                         // Determine suppression state without holding the lock across an await.
                         let (is_suppressed, is_final) = {
@@ -1398,19 +1398,20 @@ where
                             }
                         }; // lock dropped here
                         if is_suppressed {
-                            if is_final {
-                                // Extract the merged memory the agent produced and write it back.
-                                if let Some(ref path) = memory_path_for_task2 {
-                                    if let Some(merged) = extract_merged_memory(&line) {
-                                        let content = format!("{}\n", merged.trim());
-                                        match tokio::fs::write(path, content.as_bytes()).await {
-                                            Ok(_) => info!("🧠 MEMORY.md rewritten with merged content ({} bytes)", content.len()),
-                                            Err(e) => error!("Failed to rewrite MEMORY.md: {}", e),
-                                        }
+                            // Try to extract merged memory from every suppressed message.
+                            // Streaming agents send text in notifications before the final response.
+                            if let Some(ref path) = memory_path_for_task2 {
+                                if let Some(merged) = extract_merged_memory(&line) {
+                                    let content = format!("{}\n", merged.trim());
+                                    match tokio::fs::write(path, content.as_bytes()).await {
+                                        Ok(_) => info!("🧠 MEMORY.md rewritten with merged content ({} bytes)", content.len()),
+                                        Err(e) => error!("Failed to rewrite MEMORY.md: {}", e),
                                     }
+                                } else if is_final {
+                                    debug!("🧠 Final memory-update response had no <merged_memory> block — file unchanged");
                                 }
                             }
-                            debug!("🔇 Suppressed silent memory-update agent response");
+                            debug!("🔇 Suppressed silent memory-update agent response (is_final={})", is_final);
                             continue;
                         }
                     }
