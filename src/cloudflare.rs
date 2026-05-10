@@ -619,6 +619,30 @@ pub fn write_cloudflared_config(
     Ok(config_path)
 }
 
+/// Write a cloudflared config to an explicit path (e.g. inside a per-project folder).
+/// Use this instead of `write_cloudflared_config` when multiple independent bridge
+/// instances need to run simultaneously from different project folders — each project
+/// gets its own config file so they don't overwrite each other.
+pub fn write_cloudflared_config_at(
+    tunnel_id: &str,
+    credentials_path: &std::path::Path,
+    hostname: &str,
+    local_port: u16,
+    config_path: &std::path::Path,
+) -> Result<()> {
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+    }
+    let credentials_str = credentials_path.to_string_lossy();
+    let config_content = format!(
+        "tunnel: {tunnel_id}\ncredentials-file: {credentials_str}\n\ningress:\n  - hostname: {hostname}\n    service: http://localhost:{local_port}\n  - service: http_status:404\n"
+    );
+    std::fs::write(config_path, &config_content)
+        .with_context(|| format!("Failed to write cloudflared config to {}", config_path.display()))?;
+    Ok(())
+}
+
 /// Return the path to the cloudflared config YAML (does not check existence).
 pub fn cloudflared_config_path() -> Result<std::path::PathBuf> {
     Ok(get_cloudflared_dir()?.join("config.yml"))

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing::{info, error, warn};
 
-use bridge::cloudflare::{CloudflareClient, write_credentials_file, write_cloudflared_config, cloudflared_config_path};
+use bridge::cloudflare::{CloudflareClient, write_credentials_file, write_cloudflared_config, write_cloudflared_config_at, cloudflared_config_path};
 use bridge::cloudflared_runner::CloudflaredRunner;
 use bridge::bridge::StdioBridge;
 use bridge::common_config::{self as common_config, CommonConfig, SlashCommandConfig, TransportConfig};
@@ -321,10 +321,37 @@ fn build_transport(
                 cwd.to_string(),
             );
 
-            // Start cloudflared
+            // Start cloudflared.
+            // Write a per-project cloudflared.yml (inside .aptove-bridge/) with the
+            // actual runtime port before spawning. This ensures:
+            //   1. Multiple bridge instances in different folders each have their own
+            //      config file and don't overwrite each other's global ~/.cloudflared/config.yml.
+            //   2. If the user was prompted to change the port (due to a conflict), the
+            //      cloudflared ingress rule reflects the new port rather than the stale
+            //      port that was hardcoded at setup time.
             let tunnel_id = transport_cfg.tunnel_id.clone().unwrap_or_default();
             let runner = if !tunnel_id.is_empty() {
-                let config_yml = cloudflared_config_path()?;
+                let per_project_config = config_dir.join("cloudflared.yml");
+                let hostname_bare = hostname.trim_start_matches("https://");
+
+                // Re-write the per-project config with the actual port every run.
+                // Falls back to the global ~/.cloudflared/config.yml if credentials
+                // are absent (legacy setup that predates per-project configs).
+                let config_yml = if let (Some(secret), Some(account_id)) = (
+                    transport_cfg.tunnel_secret.as_deref(),
+                    transport_cfg.account_id.as_deref(),
+                ) {
+                    let credentials_path = write_credentials_file(account_id, &tunnel_id, secret)
+                        .context("Failed to write cloudflared credentials file")?;
+                    write_cloudflared_config_at(&tunnel_id, &credentials_path, hostname_bare, port, &per_project_config)
+                        .context("Failed to write per-project cloudflared config")?;
+                    info!("📄 cloudflared config: {}", per_project_config.display());
+                    per_project_config
+                } else {
+                    warn!("Cloudflare credentials absent in transport config; falling back to ~/.cloudflared/config.yml");
+                    cloudflared_config_path()?
+                };
+
                 info!("🌐 Starting cloudflared tunnel daemon...");
                 let mut runner = CloudflaredRunner::spawn(&config_yml, &tunnel_id)?;
                 runner.wait_for_ready(std::time::Duration::from_secs(30))?;
