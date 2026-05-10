@@ -69,10 +69,12 @@ bridge setup \
 3. Creates the Zero Trust Access Application with a Service Token policy
 4. Issues a Service Token (clientId + clientSecret)
 5. Configures tunnel ingress rules
-6. Writes `~/.cloudflared/<tunnel-id>.json` and `~/.cloudflared/config.yml`
-7. Saves all credentials to `common.toml` under `[transports.cloudflare]` with `enabled = true`
+6. Writes `~/.cloudflared/<tunnel-id>.json` (tunnel credentials)
+7. Saves all credentials to `.aptove-bridge/common.toml` under `[transports.cloudflare]` with `enabled = true`
 
-After setup, verify `common.toml` contains:
+On every `bridge` startup, a per-project `cloudflared.yml` is written to `.aptove-bridge/cloudflared.yml` with the correct local port. This replaces the old global `~/.cloudflared/config.yml` so that multiple bridges running from different project folders do not interfere with each other.
+
+After setup, verify `.aptove-bridge/common.toml` contains:
 
 ```toml
 [transports.cloudflare]
@@ -100,6 +102,39 @@ Transport selection is read from `common.toml` — no `--cloudflare` flag is nee
 3. Launches `cloudflared tunnel run` as a managed child process
 4. Waits up to 30 seconds for the tunnel to become active
 5. Shows a QR code for pairing
+
+---
+
+## Running Multiple Bridges Simultaneously
+
+You can run bridge instances from different project folders at the same time. Each folder is fully independent — it has its own `.aptove-bridge/common.toml`, its own agent identity, and its own `cloudflared.yml`.
+
+### Local and Tailscale transports
+
+Multiple simultaneous instances work automatically. Each bridge picks a different port and advertises its own address.
+
+### Cloudflare transport
+
+Cloudflare has an additional constraint: **a DNS CNAME record can only point to one tunnel at a time**. This means two simultaneous Cloudflare bridges must each use a **different subdomain** (and therefore a different hostname):
+
+| Project folder | Subdomain | Endpoint |
+|---------------|-----------|----------|
+| `~/code/project-a` | `project-a` | `https://project-a.example.com` |
+| `~/code/project-b` | `project-b` | `https://project-b.example.com` |
+
+Run `bridge setup` once in each folder, providing a unique `--subdomain`:
+
+```bash
+# In ~/code/project-a
+bridge setup --api-token "..." --account-id "..." --domain "example.com" --subdomain "project-a"
+
+# In ~/code/project-b
+bridge setup --api-token "..." --account-id "..." --domain "example.com" --subdomain "project-b"
+```
+
+Each setup call creates a separate Cloudflare tunnel, DNS record, and Access Application. The two bridges then run completely independently and appear as separate agents in the mobile app.
+
+> **Note:** If two bridges share the same subdomain (e.g. both use `agent.example.com`), only the bridge whose tunnel the DNS CNAME currently points to will receive traffic. Starting a second bridge will not automatically update the DNS — only the initial `setup` command does that.
 
 ---
 
@@ -177,8 +212,8 @@ bridge setup --api-token "..." --account-id "..." --domain "example.com"
 ## Security Notes
 
 - `common.toml` contains the Cloudflare API token, Service Token secret, and bridge auth token. File permissions are set to `0600` automatically.
-- The QR pairing code is valid for 60 seconds and single-use. The underlying secrets are never encoded directly in the QR image.
-- The Service Token secret (`clientSecret`) is only available at issuance time and is never retrievable from the Cloudflare API afterwards. If lost, the bridge deletes the old token and issues a fresh one automatically on the next run.
+- **The Cloudflare QR code embeds permanent credentials** (`clientId`, `clientSecret`, `authToken`). Unlike the Local and Tailscale transports which use a one-time 6-digit pairing code that expires in 60 seconds, the Cloudflare QR is a static JSON payload. Anyone who captures the QR (photo, screenshot, shoulder surfing) gains permanent access to the bridge from anywhere on the internet until credentials are manually rotated. The bridge prints a warning each time the QR is displayed — treat it like a password.
+- The Service Token secret (`clientSecret`) is only available at issuance time and is never retrievable from the Cloudflare API afterwards. If lost, the bridge deletes the old token and issues a fresh one automatically on the next run. Re-scan the QR code after rotation to update the app.
 
 ---
 
@@ -187,11 +222,13 @@ bridge setup --api-token "..." --account-id "..." --domain "example.com"
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
 | `cloudflared not found on PATH` | `cloudflared` not installed | Install per Prerequisites above |
-| `cloudflared did not become ready within 30 seconds` | Tunnel misconfigured or network issue | Check `~/.cloudflared/config.yml`; run `cloudflared tunnel run --loglevel debug` manually |
+| `cloudflared did not become ready within 30 seconds` | Tunnel misconfigured or network issue | Check `.aptove-bridge/cloudflared.yml`; run `cloudflared tunnel run --loglevel debug` manually |
 | `Authentication error (code 10000)` during setup | API token missing `Access: Service Tokens: Edit` permission | Edit the token in Cloudflare dashboard and add that permission |
-| App gets "bad response from server" | Bridge not running or Service Token expired | Ensure `bridge run` is running; re-scan QR if token was rotated |
-| App connects but times out | Wrong port in ingress rule | Delete `common.toml` and re-run `bridge setup` |
+| App gets "bad response from server" | Bridge not running or Service Token expired | Ensure `bridge` is running; re-scan QR if token was rotated |
+| App connects but times out | Wrong port in ingress rule | Re-run `bridge` — the port in `.aptove-bridge/cloudflared.yml` is rewritten automatically on every startup |
 | "403 Forbidden" from mobile | Missing `CF-Access-Client-Id`/`CF-Access-Client-Secret` headers | Re-scan the QR code |
+| `Another bridge instance is already running from this folder` | A bridge is already running in this project folder | Stop the existing bridge first; only one instance per folder is allowed |
+| Second bridge cannot connect via Cloudflare | Both bridges share the same subdomain | Run `bridge setup` in each folder with a unique `--subdomain`; see [Running Multiple Bridges](#running-multiple-bridges-simultaneously) |
 
 ---
 
