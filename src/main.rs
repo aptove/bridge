@@ -621,6 +621,13 @@ async fn prompt_transport_selection(config: &mut CommonConfig) -> Result<(String
 
         let (internal_name, _display_name) = TRANSPORTS[idx];
 
+        // Already configured — return it directly without re-running setup.
+        if let Some(tc) = config.transports.get(internal_name) {
+            if tc.enabled {
+                return Ok((internal_name.to_string(), tc.clone()));
+            }
+        }
+
         // Not configured — handle per-transport auto-configuration.
         match internal_name {
             "local" => {
