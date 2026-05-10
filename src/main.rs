@@ -807,6 +807,33 @@ async fn main() -> Result<()> {
             config.ensure_auth_token();
             config.save()?;
 
+            // Acquire an exclusive OS-level lock on .aptove-bridge/bridge.lock.
+            // The kernel automatically releases flock locks when the process exits for any
+            // reason (normal exit, panic, SIGKILL, power loss) — stale locks are impossible.
+            // This prevents two bridge instances from running in the same project folder,
+            // which would cause the same Cloudflare tunnel to load-balance across two
+            // independent agent processes and produce unpredictable behaviour.
+            let _bridge_lock = {
+                use fs2::FileExt;
+                let lock_path = CommonConfig::config_dir().join("bridge.lock");
+                let lock_file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .open(&lock_path)
+                    .with_context(|| format!("Failed to open bridge lock file: {}", lock_path.display()))?;
+                lock_file.try_lock_exclusive().map_err(|_| {
+                    anyhow::anyhow!(
+                        "Another bridge instance is already running from this folder.\n\
+                         Only one bridge instance is allowed per project folder.\n\
+                         Stop the existing bridge before starting a new one."
+                    )
+                })?;
+                lock_file
+                // lock_file is returned and bound to _bridge_lock, which lives for the
+                // remainder of the Commands::Run arm. The OS releases the lock when the
+                // process exits — no stale lock possible.
+            };
+
             let (transport_name, mut transport_cfg) = prompt_transport_selection(&mut config).await?;
 
             let config_dir = CommonConfig::config_dir();
@@ -851,6 +878,7 @@ async fn main() -> Result<()> {
             if transport_name == "cloudflare" {
                 let json = config.to_connection_json(&hostname, &transport_name, &cwd)?;
                 qr::display_qr_code(&json, &transport_name)?;
+                eprintln!("\n⚠️  This QR contains permanent Cloudflare credentials — don't share or photograph it.\n");
             } else {
                 qr::display_qr_code_with_pairing(&hostname, &pm)?;
             }
