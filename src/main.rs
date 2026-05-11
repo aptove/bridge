@@ -12,6 +12,7 @@ use bridge::tls::TlsConfig;
 use bridge::qr as qr;
 use bridge::tailscale::{is_tailscale_available, is_tailscale_installed, get_tailscale_ipv4, get_tailscale_hostname, tailscale_serve_start, TailscaleServeGuard};
 use bridge::agent_pool::{AgentPool, PoolConfig, start_reaper};
+use bridge::push::PushRelayClient;
 
 #[derive(Parser)]
 #[command(name = "bridge", version = env!("CARGO_PKG_VERSION"))]
@@ -902,6 +903,13 @@ async fn main() -> Result<()> {
             let (hostname, pm, tls_config, _ts_guard, _cf_runner) =
                 build_transport(&transport_name, &transport_cfg, &config, &config_dir, advertise_addr.as_deref(), &cwd)?;
 
+            // Attach push relay URL to the pairing response when fully configured.
+            let pm = if let Some(push_cfg) = &config.push_relay {
+                if !push_cfg.url.is_empty() && !push_cfg.client_id.is_empty() {
+                    pm.with_relay_url(push_cfg.url.clone())
+                } else { pm }
+            } else { pm };
+
             if transport_name == "cloudflare" {
                 let json = config.to_connection_json(&hostname, &transport_name, &cwd)?;
                 qr::display_qr_code(&json, &transport_name)?;
@@ -935,6 +943,22 @@ async fn main() -> Result<()> {
             let _reaper = start_reaper(pool.clone(), std::time::Duration::from_secs(60));
             bridge = bridge.with_agent_pool(pool);
             info!("♻️  Agent pool enabled (idle timeout: 30m, max agents: 10)");
+
+            // Wire up push relay if fully configured in common.toml
+            if let Some(push_cfg) = &config.push_relay {
+                if !push_cfg.url.is_empty() && !push_cfg.token_url.is_empty() && !push_cfg.client_id.is_empty() {
+                    let push_client = PushRelayClient::new(push_cfg.url.clone(), String::new())
+                        .with_jwt_credentials(
+                            push_cfg.token_url.clone(),
+                            push_cfg.client_id.clone(),
+                            push_cfg.client_secret.clone(),
+                        );
+                    info!("🔔 Push relay: JWT auth (client_id={}, relay={})", push_cfg.client_id, push_cfg.url);
+                    bridge = bridge.with_push_relay(push_client);
+                } else {
+                    warn!("⚠️  Push relay config incomplete — push notifications disabled");
+                }
+            }
 
             // Inject slash commands for agents that don't send
             // available_commands_update themselves (e.g. Copilot CLI).

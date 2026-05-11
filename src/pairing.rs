@@ -33,6 +33,10 @@ pub struct PairingResponse {
     pub client_secret: Option<String>,
     /// The working directory where the bridge was started.
     pub cwd: String,
+    /// Push relay URL, present only when push is fully configured on the bridge.
+    /// Mobile clients use this to know whether to register their push token.
+    #[serde(rename = "pushRelayUrl", skip_serializing_if = "Option::is_none")]
+    pub relay_url: Option<String>,
 }
 
 /// Error response for failed pairing attempts
@@ -78,6 +82,8 @@ pub struct PairingManager {
     client_secret: Option<String>,
     /// The working directory where the bridge was started.
     cwd: String,
+    /// Push relay URL included in the pairing response when push is configured.
+    relay_url: Option<String>,
     /// Code expiration duration
     expiry_duration: Duration,
     /// Maximum failed attempts before rate limiting
@@ -113,6 +119,7 @@ impl PairingManager {
             client_id,
             client_secret,
             cwd,
+            relay_url: None,
             expiry_duration: Duration::from_secs(60),
             max_attempts: 5,
             tailscale_path: false,
@@ -122,6 +129,13 @@ impl PairingManager {
     /// Mark this manager as using Tailscale transport (emits /pair/tailscale in QR URL)
     pub fn with_tailscale_path(mut self) -> Self {
         self.tailscale_path = true;
+        self
+    }
+
+    /// Set the push relay URL to include in the pairing response.
+    /// Only set when push is fully configured (url + client_id both non-empty).
+    pub fn with_relay_url(mut self, url: String) -> Self {
+        self.relay_url = Some(url);
         self
     }
 
@@ -218,6 +232,7 @@ impl PairingManager {
             client_id: self.client_id.clone(),
             client_secret: self.client_secret.clone(),
             cwd: self.cwd.clone(),
+            relay_url: self.relay_url.clone(),
         })
     }
 

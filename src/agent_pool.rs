@@ -29,8 +29,8 @@ impl Default for PoolConfig {
         Self {
             idle_timeout: Duration::from_secs(1800),
             max_agents: 10,
-            buffer_messages: false,
-            max_buffer_size: 1000,
+            buffer_messages: true,
+            max_buffer_size: 10_000,
         }
     }
 }
@@ -485,8 +485,8 @@ mod tests {
         let cfg = PoolConfig::default();
         assert_eq!(cfg.idle_timeout, Duration::from_secs(1800));
         assert_eq!(cfg.max_agents, 10);
-        assert!(!cfg.buffer_messages);
-        assert_eq!(cfg.max_buffer_size, 1000);
+        assert!(cfg.buffer_messages);
+        assert_eq!(cfg.max_buffer_size, 10_000);
     }
 
     // ── AgentPool::new ───────────────────────────────────────────────

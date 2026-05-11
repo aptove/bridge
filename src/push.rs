@@ -6,26 +6,35 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
+/// Cached JWT token with expiry tracking.
+struct JwtCache {
+    token: String,
+    expires_at: Instant,
+}
+
 /// Push relay client for forwarding device tokens and sending push notifications
 /// via the centralized push relay service (Cloudflare Worker).
 ///
 /// The bridge never holds APNs/FCM credentials. It only knows the relay URL
-/// and uses its auth_token as the relay_token for isolation.
+/// and authenticates via a short-lived RS256 JWT fetched from the token service.
 #[derive(Clone)]
 pub struct PushRelayClient {
     relay_url: String,
-    relay_token: String,
     http_client: reqwest::Client,
     /// Per-token debounce tracking: token → last notification time
     debounce: Arc<RwLock<HashMap<String, Instant>>>,
     /// Debounce cooldown duration (default 30s)
     cooldown: Duration,
+    /// JWT auth — set by with_jwt_credentials()
+    token_url: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    jwt_cache: Arc<RwLock<Option<JwtCache>>>,
 }
 
 /// Request to register a device token with the relay
 #[derive(Debug, Serialize)]
 struct RegisterRequest {
-    relay_token: String,
     device_token: String,
     platform: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -35,16 +44,21 @@ struct RegisterRequest {
 /// Request to unregister a device token
 #[derive(Debug, Serialize)]
 struct UnregisterRequest {
-    relay_token: String,
     device_token: String,
 }
 
 /// Request to send a push notification
 #[derive(Debug, Serialize)]
 struct PushRequest {
-    relay_token: String,
     title: String,
     body: String,
+}
+
+/// Token service response for POST /token
+#[derive(Debug, Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    expires_in: u64,
 }
 
 /// Push relay API response
@@ -60,9 +74,9 @@ struct RelayResponse {
 impl PushRelayClient {
     /// Create a new push relay client.
     ///
-    /// - `relay_url`: Base URL of the push relay (e.g., "https://push-relay.example.workers.dev")
-    /// - `relay_token`: The bridge's auth_token, used for isolation at the relay
-    pub fn new(relay_url: String, relay_token: String) -> Self {
+    /// - `relay_url`: Base URL of the push relay (e.g., "https://push.aptove.com")
+    /// - `_relay_token`: Kept for API compatibility; unused when JWT credentials are set
+    pub fn new(relay_url: String, _relay_token: String) -> Self {
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
@@ -70,17 +84,106 @@ impl PushRelayClient {
 
         Self {
             relay_url: relay_url.trim_end_matches('/').to_string(),
-            relay_token,
             http_client,
             debounce: Arc::new(RwLock::new(HashMap::new())),
             cooldown: Duration::from_secs(30),
+            token_url: None,
+            client_id: None,
+            client_secret: None,
+            jwt_cache: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Configure JWT authentication credentials from the token service.
+    pub fn with_jwt_credentials(
+        mut self,
+        token_url: String,
+        client_id: String,
+        client_secret: String,
+    ) -> Self {
+        self.token_url = Some(token_url);
+        self.client_id = Some(client_id);
+        self.client_secret = Some(client_secret);
+        self
+    }
+
+    /// Fetch (or return cached) a JWT from the token service.
+    ///
+    /// The token is cached until it has < 60 seconds remaining.
+    async fn get_jwt(&self) -> Result<String> {
+        // Fast path: return cached token if still valid
+        {
+            let cache = self.jwt_cache.read().await;
+            if let Some(ref c) = *cache {
+                if c.expires_at > Instant::now() + Duration::from_secs(60) {
+                    return Ok(c.token.clone());
+                }
+            }
+        }
+
+        let token_url = self
+            .token_url
+            .as_deref()
+            .context("token_url not configured")?;
+        let client_id = self
+            .client_id
+            .as_deref()
+            .context("client_id not configured")?;
+        let client_secret = self
+            .client_secret
+            .as_deref()
+            .context("client_secret not configured")?;
+
+        let url = format!("{}/token", token_url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "client_id": client_id,
+            "client_secret": client_secret,
+        });
+
+        debug!("Fetching JWT from token service: {}", url);
+        let res = self
+            .http_client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to contact token service")?;
+
+        let status = res.status();
+        if !status.is_success() {
+            anyhow::bail!("Token service returned HTTP {}", status);
+        }
+
+        let token_resp: TokenResponse = res
+            .json()
+            .await
+            .context("Failed to parse token service response")?;
+
+        let expires_at = Instant::now()
+            + Duration::from_secs(token_resp.expires_in.saturating_sub(60));
+
+        let mut cache = self.jwt_cache.write().await;
+        *cache = Some(JwtCache {
+            token: token_resp.access_token.clone(),
+            expires_at,
+        });
+
+        debug!("JWT fetched, expires in {}s", token_resp.expires_in);
+        Ok(token_resp.access_token)
+    }
+
+    /// Build an HTTP request with JWT Authorization header.
+    async fn authorized_request(
+        &self,
+        builder: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder> {
+        let jwt = self.get_jwt().await?;
+        Ok(builder.header("Authorization", format!("Bearer {}", jwt)))
     }
 
     /// Register a device token with the push relay.
     ///
     /// Called when the mobile app sends `bridge/registerPushToken` over WebSocket.
-    /// The relay stores the mapping: relay_token → device_token.
     pub async fn register_device(
         &self,
         device_token: &str,
@@ -89,7 +192,6 @@ impl PushRelayClient {
     ) -> Result<()> {
         let url = format!("{}/register", self.relay_url);
         let body = RegisterRequest {
-            relay_token: self.relay_token.clone(),
             device_token: device_token.to_string(),
             platform: platform.to_string(),
             bundle_id: bundle_id.map(|s| s.to_string()),
@@ -98,10 +200,9 @@ impl PushRelayClient {
         info!("📱 Registering {} device token with push relay", platform);
         debug!("Push relay URL: {}", url);
 
-        let res = self
-            .http_client
-            .post(&url)
-            .json(&body)
+        let builder = self.http_client.post(&url).json(&body);
+        let builder = self.authorized_request(builder).await?;
+        let res = builder
             .send()
             .await
             .context("Failed to contact push relay for registration")?;
@@ -129,16 +230,14 @@ impl PushRelayClient {
     pub async fn unregister_device(&self, device_token: &str) -> Result<()> {
         let url = format!("{}/register", self.relay_url);
         let body = UnregisterRequest {
-            relay_token: self.relay_token.clone(),
             device_token: device_token.to_string(),
         };
 
         info!("📱 Unregistering device token from push relay");
 
-        let res = self
-            .http_client
-            .delete(&url)
-            .json(&body)
+        let builder = self.http_client.delete(&url).json(&body);
+        let builder = self.authorized_request(builder).await?;
+        let res = builder
             .send()
             .await
             .context("Failed to contact push relay for unregistration")?;
@@ -162,8 +261,13 @@ impl PushRelayClient {
     /// The notification content is fixed ("Your agent has new activity")
     /// to prevent leaking agent response content.
     pub async fn notify(&self, agent_name: &str) -> Result<bool> {
+        // Use client_id as debounce key (unique per bridge identity)
+        let debounce_key = self
+            .client_id
+            .clone()
+            .unwrap_or_else(|| self.relay_url.clone());
+
         // Debounce check
-        let debounce_key = self.relay_token.clone();
         {
             let debounce = self.debounce.read().await;
             if let Some(last) = debounce.get(&debounce_key) {
@@ -185,17 +289,22 @@ impl PushRelayClient {
 
         let url = format!("{}/push", self.relay_url);
         let body = PushRequest {
-            relay_token: self.relay_token.clone(),
             title: agent_name.to_string(),
             body: "Your agent has new activity".to_string(),
         };
 
         info!("🔔 Sending push notification via relay for agent '{}'", agent_name);
 
-        let res = self
-            .http_client
-            .post(&url)
-            .json(&body)
+        let builder = self.http_client.post(&url).json(&body);
+        let builder = match self.authorized_request(builder).await {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("⚠️  Failed to get JWT for push notification: {}", e);
+                return Ok(false);
+            }
+        };
+
+        let res = builder
             .send()
             .await
             .context("Failed to contact push relay for notification")?;

@@ -45,6 +45,26 @@ pub struct SlashCommandConfig {
     pub input_hint: Option<String>,
 }
 
+/// Push relay configuration for sending background notifications.
+///
+/// All four fields are required — push is silently disabled if the section is
+/// absent or any field is empty.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct PushRelayConfig {
+    /// Base URL of the push relay service (e.g. "https://push.aptove.com").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    /// Base URL of the JWT token service (e.g. "https://token.aptove.com").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub token_url: String,
+    /// OAuth2 client_id issued by the token service.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_id: String,
+    /// OAuth2 client_secret issued by the token service.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_secret: String,
+}
+
 /// Stable agent identity and multi-transport settings.
 ///
 /// Replaces the old `BridgeConfig` / `bridge.toml`. Stored as `common.toml`.
@@ -68,6 +88,11 @@ pub struct CommonConfig {
     /// The bridge injects the notification after every session/new or session/load.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slash_commands: Vec<SlashCommandConfig>,
+
+    /// Push relay configuration. Push is disabled when this section is absent
+    /// or any required field is empty — no hardcoded defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_relay: Option<PushRelayConfig>,
 }
 
 /// Configuration for a single transport.
@@ -111,6 +136,7 @@ impl Default for CommonConfig {
             auth_token: String::new(),
             transports,
             slash_commands: Vec::new(),
+            push_relay: None,
         }
     }
 }
