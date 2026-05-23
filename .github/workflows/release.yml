@@ -343,6 +343,9 @@ jobs:
       - test-postinstall
     if: ${{ always() && needs.host.result == 'success' && needs.npm-build.result == 'success' && needs.test-postinstall.result == 'success' }}
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - name: Checkout
@@ -351,8 +354,14 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest
+
+      - name: Clear token auth so OIDC is used
+        run: npm config delete //registry.npmjs.org/:_authToken || true
 
       - name: Download all npm artifacts
         uses: actions/download-artifact@v4
@@ -413,8 +422,6 @@ jobs:
           done
 
       - name: Publish platform packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for pkg in bridge-darwin-arm64 bridge-darwin-x64 bridge-linux-arm64 bridge-linux-x64 bridge-win32-x64; do
             echo "Publishing @aptove/$pkg..."
@@ -426,5 +433,3 @@ jobs:
       - name: Publish @aptove/bridge
         run: npm publish --access public
         working-directory: npm/bridge
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
