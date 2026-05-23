@@ -1,6 +1,6 @@
 {
   "name": "@aptove/bridge-darwin-arm64",
-  "version": "0.2.0",
+  "version": "0.2.3",
   "description": "bridge binary for macOS Apple Silicon (arm64)",
   "license": "MIT",
   "repository": {
