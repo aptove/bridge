@@ -1,6 +1,6 @@
 {
   "name": "@aptove/bridge-darwin-x64",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "bridge binary for macOS Intel (x64)",
   "license": "MIT",
   "repository": {
