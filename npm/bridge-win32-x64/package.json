@@ -1,6 +1,6 @@
 {
   "name": "@aptove/bridge-win32-x64",
-  "version": "0.2.4",
+  "version": "0.0.0-DO_NOT_UPDATE_MANUALLY",
   "description": "bridge binary for Windows x64",
   "license": "MIT",
   "repository": {

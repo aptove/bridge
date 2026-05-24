@@ -1,6 +1,6 @@
 {
   "name": "@aptove/bridge",
-  "version": "0.2.4",
+  "version": "0.0.0-DO_NOT_UPDATE_MANUALLY",
   "description": "ACP bridge — connects ACP agents to mobile and desktop clients over WebSocket",
   "license": "MIT",
   "repository": {
@@ -33,10 +33,10 @@
     "node": ">=16"
   },
   "optionalDependencies": {
-    "@aptove/bridge-darwin-arm64": "0.2.4",
-    "@aptove/bridge-darwin-x64": "0.2.4",
-    "@aptove/bridge-linux-arm64": "0.2.4",
-    "@aptove/bridge-linux-x64": "0.2.4",
-    "@aptove/bridge-win32-x64": "0.2.4"
+    "@aptove/bridge-darwin-arm64": "0.0.0-DO_NOT_UPDATE_MANUALLY",
+    "@aptove/bridge-darwin-x64": "0.0.0-DO_NOT_UPDATE_MANUALLY",
+    "@aptove/bridge-linux-arm64": "0.0.0-DO_NOT_UPDATE_MANUALLY",
+    "@aptove/bridge-linux-x64": "0.0.0-DO_NOT_UPDATE_MANUALLY",
+    "@aptove/bridge-win32-x64": "0.0.0-DO_NOT_UPDATE_MANUALLY"
   }
 }
