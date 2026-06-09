@@ -1067,7 +1067,7 @@ where
                                         let platform = params.get("platform").and_then(|p| p.as_str()).unwrap_or("");
                                         let device_token = params.get("deviceToken").and_then(|t| t.as_str()).unwrap_or("");
                                         let bundle_id = params.get("bundleId").and_then(|b| b.as_str()).unwrap_or("");
-                                        info!("📲 Registering push token: platform={}, bundle_id={}", platform, bundle_id);
+                                        info!("📲 Registering push token: platform={}, bundle_id={}, token={}", platform, bundle_id, device_token);
                                         let relay = Arc::clone(relay);
                                         let platform = platform.to_string();
                                         let device_token = device_token.to_string();

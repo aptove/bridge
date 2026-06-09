@@ -29,6 +29,7 @@ One transport is active at a time. When multiple are enabled in `common.toml`, t
 - ⚡ **WebSocket Streaming**: Real-time bidirectional communication
 - 🌐 **Multi-Transport**: Local, Cloudflare, Tailscale — configure and switch between them
 - 🔑 **Stable Agent Identity**: `agent_id` UUID persisted in `common.toml` for multi-transport dedup on mobile
+- 🔔 **Push Notifications**: Wake the mobile app when the agent responds while backgrounded
 - 🦀 **Embeddable**: Use as a library with `StdioBridge` for in-process deployment
 
 ---
@@ -145,6 +146,13 @@ client_secret = "xxxxx"
 
 [transports.tailscale-serve]
 enabled = true
+
+# Optional — enables push notifications (see Push Notifications section below)
+[push_relay]
+url           = "https://push.aptove.com"
+token_url     = "https://token.aptove.com"
+client_id     = "your-client-id"
+client_secret = "your-client-secret"
 ```
 
 Enable only the transports you need. `agent_id` and `auth_token` are generated automatically on first run and stay stable across restarts.
@@ -180,6 +188,8 @@ bridge run --agent-command "copilot --acp"
 | `--bind <ADDR>` | `-b` | Address to bind the listener | `0.0.0.0` |
 | `--verbose` | | Enable info-level logging | Off (warn only) |
 | `--advertise-addr <ADDR>` | | Override LAN address in QR pairing URL | Auto-detected |
+| `--push-client-id <ID>` | | Push service client ID (skips interactive prompt) | Interactive |
+| `--push-client-secret <SECRET>` | | Push service client secret (skips interactive prompt) | Interactive |
 
 When `--agent-command` is omitted, the bridge presents an interactive menu:
 
@@ -231,6 +241,101 @@ bridge status
 ```
 
 Prints the active `common.toml` path, `agent_id`, enabled transports, and Tailscale availability.
+
+---
+
+## Push Notifications
+
+The bridge can alert the mobile app when the agent produces output while the app is backgrounded (WebSocket disconnected). The bridge never holds APNs/FCM credentials — it authenticates to a push relay service using a short-lived RS256 JWT and the relay handles APNs/FCM delivery.
+
+### How it works
+
+```
+Mobile app (backgrounded)          Bridge                      Push relay
+                                                               (push.aptove.com)
+        │                             │                              │
+        │  [app backgrounds]          │                              │
+        │                             │                              │
+        │                             │  agent produces output       │
+        │                             │◄─────────────────────       │
+        │                             │                              │
+        │                             │  no WebSocket receiver       │
+        │                             │  (broadcast send fails)      │
+        │                             │                              │
+        │                             │  POST /push (JWT Bearer) ───►│
+        │                             │                              │
+        │◄────────────────────────── APNs/FCM notification          │
+        │                             │                              │
+        │  [app foregrounds]          │                              │
+        │  reconnects WebSocket ─────►│                              │
+        │◄── buffered messages ───────│                              │
+```
+
+### Trigger logic
+
+Push is triggered by **passive failure detection** — the bridge never polls for connectivity:
+
+| Site | Trigger | Source |
+|------|---------|--------|
+| Agent pool (main path) | Agent stdout arrives; `broadcast::Sender::send()` returns `Err` (zero receivers — no WebSocket client connected) | `src/agent_pool.rs` |
+| Active connection drop | `ws_sender.send()` returns `Err` (client disconnected mid-stream); message is buffered before notify | `src/bridge.rs` |
+
+A 30-second per-client debounce prevents notification storms when the agent is verbose.
+
+### Setup
+
+On `bridge run`, after transport selection, the bridge prompts for push credentials if not yet configured:
+
+```
+Enable push notifications? [y/N]: y
+  Token service URL [https://token.aptove.com]:
+  Push service URL [https://push.aptove.com]:
+  Client ID: your-client-id
+  Client secret: xxxxxxxxxxxxxxxx
+```
+
+Saved to the `[push_relay]` section of `common.toml`. To skip prompts, pass credentials as flags:
+
+```bash
+bridge run --push-client-id your-client-id --push-client-secret xxxxxxxx
+```
+
+URL prompts still appear (with defaults) even when flags are provided.
+
+### `[push_relay]` config
+
+```toml
+[push_relay]
+url           = "https://push.aptove.com"   # Push relay base URL
+token_url     = "https://token.aptove.com"  # JWT token service URL
+client_id     = "your-client-id"            # M2M client ID (JWT sub)
+client_secret = "your-client-secret"        # M2M client secret
+```
+
+All four fields are required. If the section is absent or any field is empty, push is silently disabled. Push relay URL is included in the QR pairing payload so the mobile app knows where to register its device token.
+
+### Security
+
+- Device tokens travel over the bridge's authenticated WebSocket (bearer `authToken` + TLS) — the same channel that carries the full LLM conversation.
+- JWT credentials (`client_id`, `client_secret`) never leave the bridge process.
+- The relay isolates registered devices per JWT `sub` (`client_id`) — one bridge cannot trigger pushes for another bridge's devices.
+- Notification content is fixed (`"Your agent has new activity"`) to prevent leaking agent response text.
+
+### Library usage
+
+```rust
+use aptove_bridge::push::PushRelayClient;
+
+let push_client = PushRelayClient::new("https://push.aptove.com".into(), String::new())
+    .with_jwt_credentials(
+        "https://token.aptove.com".into(),
+        "your-client-id".into(),
+        "your-client-secret".into(),
+    );
+
+let bridge = StdioBridge::new("copilot --acp".into(), 8765)
+    .with_push_relay(push_client);
+```
 
 ---
 

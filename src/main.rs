@@ -77,6 +77,15 @@ enum Commands {
         /// Enable verbose logging (shows info level logs)
         #[arg(short, long)]
         verbose: bool,
+
+        /// Client ID for push notification service.
+        /// If set alongside --push-client-secret, skips the interactive push setup prompt.
+        #[arg(long)]
+        push_client_id: Option<String>,
+
+        /// Client secret for push notification service.
+        #[arg(long)]
+        push_client_secret: Option<String>,
     },
 
     /// Show connection QR code for a second device to connect to the running bridge
@@ -283,6 +292,81 @@ async fn setup_cloudflare_transport() -> Result<TransportConfig> {
         domain: Some(domain),
         subdomain: Some(subdomain),
     })
+}
+
+/// Interactively configure push notification credentials.
+///
+/// Skipped if push is already configured in common.toml or if both
+/// --push-client-id and --push-client-secret CLI flags were provided.
+fn prompt_push_setup(
+    config: &mut CommonConfig,
+    client_id_arg: Option<&str>,
+    client_secret_arg: Option<&str>,
+) -> Result<()> {
+    use std::io::{self, BufRead, Write};
+
+    // Already fully configured — nothing to do.
+    if let Some(ref pr) = config.push_relay {
+        if !pr.url.is_empty() && !pr.token_url.is_empty()
+            && !pr.client_id.is_empty() && !pr.client_secret.is_empty()
+        {
+            return Ok(());
+        }
+    }
+
+    let stdin = io::stdin();
+    let mut lines = stdin.lock().lines();
+    let mut prompt = |msg: &str| -> Result<String> {
+        print!("{}", msg);
+        io::stdout().flush()?;
+        Ok(lines.next().context("stdin closed")??.trim().to_string())
+    };
+
+    let answer = prompt("\nEnable push notifications? [y/N]: ")?;
+    if !matches!(answer.to_lowercase().as_str(), "y" | "yes") {
+        return Ok(());
+    }
+
+    let token_url_input = prompt("  Token service URL [https://token.aptove.com]: ")?;
+    let token_url = if token_url_input.is_empty() {
+        "https://token.aptove.com".to_string()
+    } else {
+        token_url_input
+    };
+
+    let push_url_input = prompt("  Push service URL [https://push.aptove.com]: ")?;
+    let push_url = if push_url_input.is_empty() {
+        "https://push.aptove.com".to_string()
+    } else {
+        push_url_input
+    };
+
+    let client_id = if let Some(id) = client_id_arg {
+        println!("  Client ID: {} (from --push-client-id)", id);
+        id.to_string()
+    } else {
+        let id = prompt("  Client ID: ")?;
+        if id.is_empty() { anyhow::bail!("Client ID cannot be empty"); }
+        id
+    };
+
+    let client_secret = if let Some(secret) = client_secret_arg {
+        secret.to_string()
+    } else {
+        let s = prompt("  Client secret: ")?;
+        if s.is_empty() { anyhow::bail!("Client secret cannot be empty"); }
+        s
+    };
+
+    config.push_relay = Some(bridge::common_config::PushRelayConfig {
+        url: push_url,
+        token_url,
+        client_id,
+        client_secret,
+    });
+    config.save()?;
+    info!("Push notification config saved to common.toml");
+    Ok(())
 }
 
 /// Build a `PairingManager` and optionally a `TlsConfig` for a single transport.
@@ -732,6 +816,8 @@ async fn main() -> Result<()> {
         bind: "0.0.0.0".to_string(),
         advertise_addr: None,
         verbose: false,
+        push_client_id: None,
+        push_client_secret: None,
     });
 
     // Determine log level based on command and flags
@@ -819,7 +905,7 @@ async fn main() -> Result<()> {
             println!("\n🚀 Start the bridge with: bridge");
         }
 
-        Commands::Run { agent_command, bind, advertise_addr, verbose: _ } => {
+        Commands::Run { agent_command, bind, advertise_addr, verbose: _, push_client_id, push_client_secret } => {
             let agent_command = match agent_command {
                 Some(cmd) => cmd,
                 None => prompt_agent_command()?,
@@ -863,6 +949,8 @@ async fn main() -> Result<()> {
             };
 
             let (transport_name, mut transport_cfg) = prompt_transport_selection(&mut config).await?;
+
+            prompt_push_setup(&mut config, push_client_id.as_deref(), push_client_secret.as_deref())?;
 
             let config_dir = CommonConfig::config_dir();
 
