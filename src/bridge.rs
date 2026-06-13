@@ -1073,7 +1073,7 @@ where
                                         let device_token = device_token.to_string();
                                         let bundle_id = bundle_id.to_string();
                                         tokio::spawn(async move {
-                                            if let Err(e) = relay.register_device(&platform, &device_token, Some(&bundle_id)).await {
+                                            if let Err(e) = relay.register_device(&device_token, &platform, Some(&bundle_id)).await {
                                                 error!("Failed to register push token: {}", e);
                                             } else {
                                                 info!("✅ Push token registered successfully");
