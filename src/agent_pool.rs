@@ -249,17 +249,20 @@ impl AgentPool {
                 
                 // Attempt to send to broadcast channel
                 match stdout_tx.send(line) {
-                    Ok(_) => {
-                        // Message was sent successfully (has at least one receiver)
-                        debug!("Agent output sent to connected client");
+                    Ok(receiver_count) => {
+                        // Message was sent successfully; receiver_count = number of active WS clients
+                        info!("[push-dbg] agent stdout → broadcast OK ({} receiver(s) connected)", receiver_count);
                     }
                     Err(_) => {
                         // No receivers = no WebSocket client connected
+                        info!("[push-dbg] agent stdout → broadcast Err (0 receivers) — app disconnected, triggering push");
                         if let Some(ref push_relay) = push_relay_for_stdout {
-                            debug!("Agent output with no connected client, triggering push notification");
-                            if let Err(e) = push_relay.notify(&agent_token_for_push).await {
-                                warn!("Failed to send push notification: {}", e);
+                            match push_relay.notify(&agent_token_for_push).await {
+                                Ok(sent) => info!("[push-dbg] push relay notify: sent={}", sent),
+                                Err(e) => warn!("[push-dbg] push relay notify failed: {}", e),
                             }
+                        } else {
+                            info!("[push-dbg] no push relay configured — push skipped");
                         }
                     }
                 }

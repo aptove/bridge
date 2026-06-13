@@ -1436,24 +1436,30 @@ where
                         && is_create_session_response(&line)
                         && !line.contains("\"error\"");
 
+                    info!("[push-dbg] ws_sender.send() attempting ({} bytes)", line.len());
                     debug!("📤 Sending to Mobile ({} bytes): {}", line.len(),
                         line.chars().take(200).collect::<String>());
 
                     if let Err(e) = ws_sender.send(Message::Text(line.clone().into())).await {
-                        debug!("Client disconnected, buffering message: {}", e);
+                        info!("[push-dbg] ws_sender.send() FAILED — client disconnected: {}", e);
                         let mut pool = pool_for_buffer.write().await;
                         pool.buffer_message(&token_for_buffer, line);
                         // Send push notification since client is disconnected
                         if let Some(ref relay) = push_relay {
+                            info!("[push-dbg] triggering push via relay (active-connection-drop path)");
                             let relay = Arc::clone(relay);
                             tokio::spawn(async move {
-                                if let Err(e) = relay.notify("Agent").await {
-                                    debug!("Push notification failed: {}", e);
+                                match relay.notify("Agent").await {
+                                    Ok(sent) => info!("[push-dbg] push relay notify: sent={}", sent),
+                                    Err(e) => warn!("[push-dbg] push relay notify failed: {}", e),
                                 }
                             });
+                        } else {
+                            info!("[push-dbg] no push relay configured — push skipped");
                         }
                         break;
                     }
+                    info!("[push-dbg] ws_sender.send() OK — message delivered to connected client");
 
                     // Inject available_commands_update immediately after the session
                     // response so clients that connect to agents without native support
