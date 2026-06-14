@@ -97,6 +97,12 @@ enum Commands {
 
     /// Check configuration status
     Status,
+
+    /// Send a test push notification to all registered devices
+    ///
+    /// Loads push relay credentials from common.toml and sends a test notification.
+    /// The bridge does not need to be running for this command.
+    TestPush,
 }
 
 /// Ensure Cloudflare config exists — load it if valid, auto-rotate token if near expiry,
@@ -1142,6 +1148,39 @@ async fn main() -> Result<()> {
                 println!("Tailscale: installed but not running (open the Tailscale app to connect)");
             } else {
                 println!("Tailscale: not installed (https://tailscale.com/download)");
+            }
+        }
+
+        Commands::TestPush => {
+            let config = CommonConfig::load()?;
+            let push_cfg = config.push_relay.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("Push relay not configured. Add [push_relay] to common.toml or run 'bridge run' to set it up interactively.")
+            })?;
+
+            if push_cfg.url.is_empty() || push_cfg.token_url.is_empty()
+                || push_cfg.client_id.is_empty() || push_cfg.client_secret.is_empty()
+            {
+                anyhow::bail!("Push relay config is incomplete. Check [push_relay] in common.toml.");
+            }
+
+            println!("Sending test push notification...");
+            println!("  Relay:     {}", push_cfg.url);
+            println!("  Client ID: {}", push_cfg.client_id);
+
+            let push_client = PushRelayClient::new(push_cfg.url.clone(), String::new())
+                .with_jwt_credentials(
+                    push_cfg.token_url.clone(),
+                    push_cfg.client_id.clone(),
+                    push_cfg.client_secret.clone(),
+                );
+
+            match push_client.notify("test").await {
+                Ok(true) => println!("✅ Push notification sent."),
+                Ok(false) => println!("⚠️  No registered devices found (or debounce active). No notification sent."),
+                Err(e) => {
+                    eprintln!("❌ Push notification failed: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
     }
