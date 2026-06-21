@@ -209,8 +209,8 @@ impl StdioBridge {
     }
 
     /// Enable push notifications via relay
-    pub fn with_push_relay(mut self, client: PushRelayClient) -> Self {
-        self.push_relay = Some(Arc::new(client));
+    pub fn with_push_relay(mut self, client: Arc<PushRelayClient>) -> Self {
+        self.push_relay = Some(client);
         self
     }
 
@@ -946,14 +946,6 @@ where
         info!("🆕 Started new agent session");
     }
     
-    // Replay buffered messages
-    for msg in buffered {
-        debug!("📦 Replaying buffered message: {}", msg.chars().take(200).collect::<String>());
-        if let Err(e) = ws_sender.send(Message::Text(msg.into())).await {
-            error!("Failed to replay buffered message: {}", e);
-        }
-    }
-    
     // Memory injection: start as false (inject on first session/prompt).
     // Set to true only when reusing an agent with a session/load (resume) — memory already in context.
     let mut initial_memory_injected = false;
@@ -976,7 +968,7 @@ where
         } else {
             debug!("No cached initialize response, first connection will capture it");
         }
-        
+
         // Also intercept session requests (session/new or session/load) to reuse the same session ID
         if let Some(ref cached) = cached_session {
             info!("🔄 Intercepting session request for session resumption");
@@ -993,6 +985,32 @@ where
             initial_memory_injected = !reuse_was_new_session;
         } else {
             debug!("No cached session response, first connection will capture it");
+        }
+
+        // Replay buffered messages after session is fully re-established so the
+        // client has a valid session context to process them.
+        let total = buffered.len();
+        if total > 0 {
+            info!("📦 [push-dbg] Replaying {} buffered message(s) after session resume", total);
+            for (i, msg) in buffered.into_iter().enumerate() {
+                info!("📦 [push-dbg] Buffered [{}/{}] ({}B): {}", i + 1, total, msg.len(), msg.chars().take(200).collect::<String>());
+                if let Err(e) = ws_sender.send(Message::Text(msg.into())).await {
+                    error!("Failed to replay buffered message: {}", e);
+                }
+            }
+        }
+
+        // Signal iOS that buffer replay is complete so it can finalise any
+        // pending sendMessage() response that was interrupted by a background disconnect.
+        if was_reused {
+            let notif = format!(
+                r#"{{"jsonrpc":"2.0","method":"bridge/bufferReplayComplete","params":{{"count":{}}}}}"#,
+                total
+            );
+            info!("📦 [push-dbg] Sending bridge/bufferReplayComplete (count={})", total);
+            if let Err(e) = ws_sender.send(Message::Text(notif.into())).await {
+                error!("Failed to send bufferReplayComplete: {}", e);
+            }
         }
     }
     
@@ -1295,6 +1313,10 @@ where
     let shutdown_tx_clone = shutdown_tx.clone();
     let token_for_buffer = token.clone();
     let pool_for_buffer = Arc::clone(&pool);
+    let agent_name_for_push = {
+        let pool = pool.read().await;
+        pool.get_agent_name(&token)
+    };
     let current_session_id_task2 = Arc::clone(&current_session_id);
     let suppress_response_id_task2 = Arc::clone(&suppress_response_id);
     let memory_path_for_task2 = memory_path.clone();
@@ -1448,8 +1470,10 @@ where
                         if let Some(ref relay) = push_relay {
                             info!("[push-dbg] triggering push via relay (active-connection-drop path)");
                             let relay = Arc::clone(relay);
+                            let name = agent_name_for_push.clone();
                             tokio::spawn(async move {
-                                match relay.notify("Agent").await {
+                                let agent_name = name.read().await.clone();
+                                match relay.notify(&agent_name).await {
                                     Ok(sent) => info!("[push-dbg] push relay notify: sent={}", sent),
                                     Err(e) => warn!("[push-dbg] push relay notify failed: {}", e),
                                 }

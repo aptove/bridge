@@ -1029,29 +1029,40 @@ async fn main() -> Result<()> {
                 bridge = bridge.with_external_tls();
             }
 
-            // Enable agent pool for persistent sessions (keep-alive across disconnects)
-            let pool = std::sync::Arc::new(tokio::sync::RwLock::new(
-                AgentPool::new(PoolConfig::default())
-                    .with_working_dir(cwd.clone().into()),
-            ));
-            let _reaper = start_reaper(pool.clone(), std::time::Duration::from_secs(60));
-            bridge = bridge.with_agent_pool(pool);
-            info!("♻️  Agent pool enabled (idle timeout: 30m, max agents: 10)");
-
-            // Wire up push relay if fully configured in common.toml
-            if let Some(push_cfg) = &config.push_relay {
+            // Wire up push relay if fully configured in common.toml.
+            // Build as Arc so the same instance can be shared with both
+            // the agent pool (broadcast path) and the bridge (send-fail path).
+            let push_relay_arc: Option<std::sync::Arc<PushRelayClient>> = if let Some(push_cfg) = &config.push_relay {
                 if !push_cfg.url.is_empty() && !push_cfg.token_url.is_empty() && !push_cfg.client_id.is_empty() {
-                    let push_client = PushRelayClient::new(push_cfg.url.clone(), String::new())
+                    let client = PushRelayClient::new(push_cfg.url.clone(), String::new())
                         .with_jwt_credentials(
                             push_cfg.token_url.clone(),
                             push_cfg.client_id.clone(),
                             push_cfg.client_secret.clone(),
                         );
                     info!("🔔 Push relay: JWT auth (client_id={}, relay={})", push_cfg.client_id, push_cfg.url);
-                    bridge = bridge.with_push_relay(push_client);
+                    Some(std::sync::Arc::new(client))
                 } else {
                     warn!("⚠️  Push relay config incomplete — push notifications disabled");
+                    None
                 }
+            } else {
+                None
+            };
+
+            // Enable agent pool for persistent sessions (keep-alive across disconnects)
+            let mut pool_builder = AgentPool::new(PoolConfig::default())
+                .with_working_dir(cwd.clone().into());
+            if let Some(ref relay) = push_relay_arc {
+                pool_builder = pool_builder.with_push_relay(std::sync::Arc::clone(relay));
+            }
+            let pool = std::sync::Arc::new(tokio::sync::RwLock::new(pool_builder));
+            let _reaper = start_reaper(pool.clone(), std::time::Duration::from_secs(60));
+            bridge = bridge.with_agent_pool(pool);
+            info!("♻️  Agent pool enabled (idle timeout: 30m, max agents: 10)");
+
+            if let Some(relay) = push_relay_arc {
+                bridge = bridge.with_push_relay(relay);
             }
 
             // Inject slash commands for agents that don't send

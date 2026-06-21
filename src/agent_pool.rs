@@ -48,8 +48,11 @@ pub struct PooledAgent {
     pub connected: bool,
     /// When the client last disconnected (for idle timeout)
     pub disconnected_at: Option<Instant>,
-    /// Buffered messages from agent while client was disconnected
+    /// Buffered messages from agent while client was disconnected (written by bridge.rs send-fail path)
     pub message_buffer: Vec<String>,
+    /// Overflow buffer written by the stdout broadcast task when there are 0 receivers.
+    /// Drained into message_buffer on reconnect.
+    overflow_buffer: Arc<tokio::sync::Mutex<Vec<String>>>,
     /// Cached `initialize` response from the agent (raw JSON-RPC result).
     /// On reconnect we intercept the client's `initialize` request and reply
     /// with this cached response instead of forwarding to the agent.
@@ -62,6 +65,9 @@ pub struct PooledAgent {
     /// The agent command used to spawn this agent
     #[allow(dead_code)]
     pub agent_command: String,
+    /// Human-readable agent name (from initialize response). Shared with the
+    /// stdout broadcast task for push notification titles.
+    pub agent_name: Arc<tokio::sync::RwLock<String>>,
 }
 
 impl PooledAgent {
@@ -131,6 +137,20 @@ impl AgentPool {
                 info!("Reusing existing agent for token (keep-alive)");
                 agent.connected = true;
                 agent.disconnected_at = None;
+
+                // Drain messages buffered by the stdout task (broadcast Err path)
+                {
+                    let mut overflow = agent.overflow_buffer.lock().await;
+                    let overflow_count = overflow.len();
+                    if overflow_count > 0 {
+                        info!("[push-dbg] draining {} overflow message(s) into replay buffer", overflow_count);
+                    }
+                    for msg in overflow.drain(..) {
+                        if agent.message_buffer.len() < self.config.max_buffer_size {
+                            agent.message_buffer.push(msg);
+                        }
+                    }
+                }
 
                 let buffered = std::mem::take(&mut agent.message_buffer);
                 if !buffered.is_empty() {
@@ -237,7 +257,12 @@ impl AgentPool {
         let stdout_tx = agent_to_ws_tx.clone();
         let stdout_reader = BufReader::new(stdout);
         let push_relay_for_stdout: Option<Arc<PushRelayClient>> = self.push_relay.clone();
-        let agent_token_for_push = token.to_string();
+        let agent_name_shared = Arc::new(tokio::sync::RwLock::new("Agent".to_string()));
+        let agent_name_for_stdout = Arc::clone(&agent_name_shared);
+        let overflow_buffer = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let overflow_for_stdout = Arc::clone(&overflow_buffer);
+        let max_buffer = self.config.max_buffer_size;
+        let buffer_enabled = self.config.buffer_messages;
         tokio::spawn(async move {
             let mut lines = stdout_reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -246,18 +271,34 @@ impl AgentPool {
                     line.len(),
                     line.chars().take(200).collect::<String>()
                 );
-                
+
                 // Attempt to send to broadcast channel
                 match stdout_tx.send(line) {
                     Ok(receiver_count) => {
                         // Message was sent successfully; receiver_count = number of active WS clients
                         info!("[push-dbg] agent stdout → broadcast OK ({} receiver(s) connected)", receiver_count);
                     }
-                    Err(_) => {
-                        // No receivers = no WebSocket client connected
-                        info!("[push-dbg] agent stdout → broadcast Err (0 receivers) — app disconnected, triggering push");
+                    Err(e) => {
+                        // No receivers = no WebSocket client connected; buffer the message and push
+                        let msg = e.0;
+                        if buffer_enabled {
+                            let mut buf = overflow_for_stdout.lock().await;
+                            if buf.len() < max_buffer {
+                                info!("[push-dbg] 0 receivers — buffering message #{} ({}B): {}",
+                                    buf.len() + 1,
+                                    msg.len(),
+                                    msg.chars().take(120).collect::<String>());
+                                buf.push(msg);
+                            } else {
+                                warn!("[push-dbg] overflow buffer full ({} messages) — dropping agent message", buf.len());
+                            }
+                        } else {
+                            info!("[push-dbg] 0 receivers — buffering disabled, message dropped");
+                        }
                         if let Some(ref push_relay) = push_relay_for_stdout {
-                            match push_relay.notify(&agent_token_for_push).await {
+                            let name = agent_name_for_stdout.read().await.clone();
+                            info!("[push-dbg] triggering push notification (overflow-buffer path) for '{}'", name);
+                            match push_relay.notify(&name).await {
                                 Ok(sent) => info!("[push-dbg] push relay notify: sent={}", sent),
                                 Err(e) => warn!("[push-dbg] push relay notify failed: {}", e),
                             }
@@ -287,9 +328,11 @@ impl AgentPool {
             connected: true,
             disconnected_at: None,
             message_buffer: Vec::new(),
+            overflow_buffer,
             cached_init_response: None,
             cached_session_response: None,
             agent_command: agent_command.to_string(),
+            agent_name: agent_name_shared,
         };
 
         self.agents.insert(token.to_string(), pooled);
@@ -308,12 +351,33 @@ impl AgentPool {
         }
     }
 
-    /// Cache the agent's `initialize` response so reconnections can skip re-initialization
+    /// Cache the agent's `initialize` response so reconnections can skip re-initialization.
+    /// Also extracts and stores the agent name from the response.
     pub fn cache_init_response(&mut self, token: &str, response: String) {
         if let Some(agent) = self.agents.get_mut(token) {
             info!("Cached initialize response for agent (keep-alive)");
+            // Extract agent name from agentInfo.name or serverInfo.name
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&response) {
+                let name = v["result"]["agentInfo"]["name"].as_str()
+                    .or_else(|| v["result"]["serverInfo"]["name"].as_str());
+                if let Some(name) = name {
+                    let agent_name = Arc::clone(&agent.agent_name);
+                    let name_owned = name.to_string();
+                    tokio::spawn(async move {
+                        *agent_name.write().await = name_owned;
+                    });
+                    info!("Agent name set to '{}'", name);
+                }
+            }
             agent.cached_init_response = Some(response);
         }
+    }
+
+    /// Get the agent name for push notifications
+    pub fn get_agent_name(&self, token: &str) -> Arc<tokio::sync::RwLock<String>> {
+        self.agents.get(token)
+            .map(|a| Arc::clone(&a.agent_name))
+            .unwrap_or_else(|| Arc::new(tokio::sync::RwLock::new("Agent".to_string())))
     }
 
     /// Cache the agent's `createSession` response so reconnections reuse the same session ID

@@ -52,6 +52,8 @@ struct UnregisterRequest {
 struct PushRequest {
     title: String,
     body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<HashMap<String, String>>,
 }
 
 /// Token service response for POST /token
@@ -288,9 +290,12 @@ impl PushRelayClient {
         }
 
         let url = format!("{}/push", self.relay_url);
+        let mut data = HashMap::new();
+        data.insert("agentName".to_string(), agent_name.to_string());
         let body = PushRequest {
             title: agent_name.to_string(),
             body: "Your agent has new activity".to_string(),
+            data: Some(data),
         };
 
         info!("🔔 Sending push notification via relay for agent '{}'", agent_name);
