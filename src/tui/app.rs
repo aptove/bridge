@@ -16,9 +16,9 @@ use crate::tui::{
         popup::{render_popup, PopupKind},
         running::{render_running, RunningState},
         wizard::{
-            render_wizard, wizard_backspace, wizard_confirm_agent,
+            compute_transport_statuses, render_wizard, wizard_backspace, wizard_confirm_agent,
             wizard_move_down, wizard_move_up, wizard_next_field, wizard_type_char, WizardState,
-            WizardStep,
+            WizardStep, TRANSPORTS,
         },
     },
     widgets::input_bar::{AcEntry, AutocompleteState},
@@ -72,6 +72,9 @@ pub struct App {
     ac_matches: Vec<usize>,
     ac_idx: usize,
 
+    // Transport selected for this session (set by wizard or auto-detected).
+    selected_transport: Option<String>,
+
     // Bridge shutdown signal.
     bridge_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 
@@ -86,6 +89,13 @@ impl App {
     pub fn new(config: CommonConfig, event_tx: mpsc::Sender<AppEvent>) -> Self {
         let wizard = WizardState::compute(&config);
         let screen = if wizard.is_some() { Screen::Wizard } else { Screen::Running };
+
+        // When no wizard is needed there's exactly one enabled transport — pre-select it.
+        let selected_transport = if wizard.is_none() {
+            config.enabled_transports().first().map(|(n, _)| n.to_string())
+        } else {
+            None
+        };
 
         Self {
             screen,
@@ -105,6 +115,7 @@ impl App {
             input: String::new(),
             ac_matches: Vec::new(),
             ac_idx: 0,
+            selected_transport,
             bridge_shutdown: None,
             event_tx,
             quit: false,
@@ -288,49 +299,9 @@ impl App {
                 }
             }
 
-            Some(WizardStep::TransportSelect { selected, .. }) => {
-                let transport_name = ["local", "tailscale-serve", "cloudflare"][selected];
-                match transport_name {
-                    "local" => {
-                        let port = 8765u16;
-                        let tc = TransportConfig {
-                            enabled: true,
-                            port: Some(port),
-                            tls: Some(true),
-                            ..Default::default()
-                        };
-                        self.config.transports.insert("local".to_string(), tc);
-                        let _ = self.config.save();
-                        self.advance_wizard_after_transport().await;
-                    }
-                    "tailscale-serve" => {
-                        let tc = TransportConfig {
-                            enabled: true,
-                            port: Some(8766),
-                            tls: None,
-                            ..Default::default()
-                        };
-                        self.config.transports.insert("tailscale-serve".to_string(), tc);
-                        let _ = self.config.save();
-                        self.advance_wizard_after_transport().await;
-                    }
-                    "cloudflare" => {
-                        // Advance to Cloudflare setup form.
-                        if let Some(ref mut w) = self.wizard {
-                            w.step = WizardStep::CloudflareSetup {
-                                fields: [
-                                    String::new(),
-                                    String::new(),
-                                    String::new(),
-                                    "agent".to_string(),
-                                ],
-                                field_idx: 0,
-                                error: None,
-                            };
-                        }
-                    }
-                    _ => {}
-                }
+            Some(WizardStep::TransportPick { selected, ts_available, .. }) => {
+                let name = TRANSPORTS[selected];
+                self.handle_transport_pick(name, ts_available).await;
             }
 
             Some(WizardStep::CloudflareSetup { ref fields, field_idx, .. }) => {
@@ -410,13 +381,86 @@ impl App {
     }
 
     async fn advance_wizard_after_agent(&mut self) {
-        // Check if transport is already configured.
-        if self.config.enabled_transports().is_empty() {
-            let ts_available = crate::tailscale::is_tailscale_available();
-            let ts_installed = crate::tailscale::is_tailscale_installed();
-            if let Some(ref mut w) = self.wizard {
-                w.step = WizardStep::TransportSelect { selected: 0, ts_available, ts_installed };
+        let enabled_count = self.config.enabled_transports().len();
+        if enabled_count == 1 {
+            // Exactly one transport configured — use it automatically.
+            let name = self.config.enabled_transports()[0].0.to_string();
+            self.selected_transport = Some(name);
+            self.advance_wizard_after_transport().await;
+        } else {
+            // 0 or 2+ transports: user must pick.
+            self.show_transport_pick();
+        }
+    }
+
+    fn show_transport_pick(&mut self) {
+        let ts_available = crate::tailscale::is_tailscale_available();
+        let ts_installed = crate::tailscale::is_tailscale_installed();
+        let active = if self.transport_name.is_empty() { None } else { Some(self.transport_name.as_str()) };
+        let statuses = compute_transport_statuses(&self.config, active, ts_available, ts_installed);
+        if let Some(ref mut w) = self.wizard {
+            w.step = WizardStep::TransportPick { selected: 0, ts_available, ts_installed, statuses };
+        }
+    }
+
+    /// Handle the user confirming a transport in the `TransportPick` step.
+    async fn handle_transport_pick(&mut self, name: &'static str, ts_available: bool) {
+        let already_ready = {
+            let tc = self.config.transports.get(name);
+            let enabled = tc.map(|t| t.enabled).unwrap_or(false);
+            let cf_ok = name != "cloudflare" || tc.and_then(|t| t.tunnel_id.as_ref()).is_some();
+            enabled && cf_ok
+        };
+
+        if already_ready {
+            // Transport is configured — just pick it.
+            self.selected_transport = Some(name.to_string());
+            self.advance_after_transport_pick().await;
+            return;
+        }
+
+        // Transport needs setup.
+        match name {
+            "local" => {
+                let tc = TransportConfig { enabled: true, port: Some(8765), tls: Some(true), ..Default::default() };
+                self.config.transports.insert("local".to_string(), tc);
+                let _ = self.config.save();
+                self.selected_transport = Some("local".to_string());
+                self.advance_after_transport_pick().await;
             }
+            "tailscale-serve" => {
+                if !ts_available {
+                    // Can't enable — refresh the picker with updated status.
+                    self.show_transport_pick();
+                    return;
+                }
+                let tc = TransportConfig { enabled: true, port: Some(8766), tls: None, ..Default::default() };
+                self.config.transports.insert("tailscale-serve".to_string(), tc);
+                let _ = self.config.save();
+                self.selected_transport = Some("tailscale-serve".to_string());
+                self.advance_after_transport_pick().await;
+            }
+            "cloudflare" => {
+                if let Some(ref mut w) = self.wizard {
+                    w.step = WizardStep::CloudflareSetup {
+                        fields: [String::new(), String::new(), String::new(), "agent".to_string()],
+                        field_idx: 0,
+                        error: None,
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Called after a transport has been picked (and set up if needed).
+    ///
+    /// In reconnect mode: skip push setup, go straight to Done.
+    /// In normal mode: continue with push setup check.
+    async fn advance_after_transport_pick(&mut self) {
+        let reconnect = self.wizard.as_ref().map(|w| w.reconnect_mode).unwrap_or(false);
+        if reconnect {
+            self.finish_wizard();
         } else {
             self.advance_wizard_after_transport().await;
         }
@@ -460,7 +504,8 @@ impl App {
             Ok(tc) => {
                 self.config.transports.insert("cloudflare".to_string(), tc);
                 let _ = self.config.save();
-                self.advance_wizard_after_transport().await;
+                self.selected_transport = Some("cloudflare".to_string());
+                self.advance_after_transport_pick().await;
             }
             Err(e) => {
                 // Revert to CF form with error.
@@ -476,13 +521,27 @@ impl App {
     }
 
     fn start_bridge(&mut self) {
+        let transport = match self.selected_transport.clone() {
+            Some(t) => t,
+            None => {
+                // Fallback: use the only enabled transport (should not happen normally).
+                match self.config.enabled_transports().first().map(|(n, _)| n.to_string()) {
+                    Some(t) => t,
+                    None => {
+                        self.log_push("No transport configured — cannot start bridge.".to_string());
+                        return;
+                    }
+                }
+            }
+        };
         let config = self.config.clone();
         let event_tx = self.event_tx.clone();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         self.bridge_shutdown = Some(shutdown_tx);
+        self.transport_up = false;
 
         tokio::spawn(async move {
-            if let Err(e) = run_bridge(config, event_tx.clone(), shutdown_rx).await {
+            if let Err(e) = run_bridge(config, transport, event_tx.clone(), shutdown_rx).await {
                 let _ = event_tx.send(AppEvent::Bridge(BridgeEvent::BridgeError {
                     message: e.to_string(),
                 })).await;
@@ -603,7 +662,16 @@ impl App {
                 self.quit = true;
             }
             "/reconnect" => {
-                self.log_push("Reconnect not yet implemented — restart the bridge.".to_string());
+                // Stop the running bridge (if any), then show transport picker.
+                if let Some(tx) = self.bridge_shutdown.take() {
+                    let _ = tx.send(());
+                }
+                self.transport_up = false;
+                let active = self.selected_transport.as_deref();
+                let reconnect_wizard = WizardState::for_reconnect(&self.config, active);
+                self.wizard = Some(reconnect_wizard);
+                self.screen = Screen::Wizard;
+                self.log_push("Stopped bridge. Choose a transport to reconnect.".to_string());
             }
             "/test-push" => {
                 self.handle_test_push();
@@ -611,7 +679,8 @@ impl App {
             "/config" => {
                 // Re-run wizard from the beginning.
                 self.wizard = Some(WizardState {
-                    step: crate::tui::screens::wizard::WizardStep::AgentSelect { selected: 0 },
+                    step: WizardStep::AgentSelect { selected: 0 },
+                    reconnect_mode: false,
                 });
                 self.screen = Screen::Wizard;
             }

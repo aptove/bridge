@@ -127,12 +127,13 @@ pub fn build_transport(
     }
 }
 
-/// Start the bridge for all enabled transports in `config`.
+/// Start the bridge on the given `transport_name`.
 ///
 /// This function runs until the bridge exits or `shutdown_rx` fires.
 /// Progress / status events are sent via `event_tx`.
 pub async fn run_bridge(
     config: CommonConfig,
+    transport_name: String,
     event_tx: mpsc::Sender<AppEvent>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<()> {
@@ -153,11 +154,9 @@ pub async fn run_bridge(
         lock_file
     };
 
-    let (transport_name, transport_cfg) = config.enabled_transports()
-        .into_iter()
-        .next()
-        .map(|(n, t)| (n.to_string(), t.clone()))
-        .ok_or_else(|| anyhow::anyhow!("No enabled transport in config"))?;
+    let transport_cfg = config.transports.get(&transport_name)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Transport '{}' not found in config", transport_name))?;
 
     let config_dir = CommonConfig::config_dir();
     let cwd = std::env::current_dir()
