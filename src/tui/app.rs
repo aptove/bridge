@@ -32,7 +32,6 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// All slash commands with their one-line descriptions.
 const COMMANDS: &[(&str, &str)] = &[
     ("/qr",          "Show QR pairing code"),
-    ("/status",      "Show configuration status"),
     ("/test-push",   "Send a test push notification"),
     ("/reconnect",   "Restart all transports"),
     ("/keep-alive",  "Toggle prevent-sleep (on by default)"),
@@ -187,8 +186,7 @@ impl App {
                         };
                         render_running(frame, &running_state, &self.logs, self.log_scroll, &self.input, VERSION, ac_state.as_ref());
                         if let Some(ref popup) = self.popup {
-                            let status_text = self.build_status_text();
-                            render_popup(frame, popup, &self.qr_string, &status_text);
+                            render_popup(frame, popup, &self.qr_string);
                         }
                     }
                 }
@@ -705,9 +703,6 @@ impl App {
             "/qr" => {
                 self.popup = Some(PopupKind::QrCode);
             }
-            "/status" => {
-                self.popup = Some(PopupKind::Status);
-            }
             "/help" => {
                 self.popup = Some(PopupKind::Help);
             }
@@ -885,36 +880,6 @@ impl App {
         }
     }
 
-    fn build_status_text(&self) -> String {
-        let mut lines = vec![
-            format!("Agent ID:    {}", if self.config.agent_id.is_empty() { "(not set)" } else { &self.config.agent_id }),
-            format!("Agent cmd:   {}", self.config.agent_command.as_deref().unwrap_or("(not set)")),
-            format!("Config dir:  {}", CommonConfig::config_dir().display()),
-            String::new(),
-            "Transports:".to_string(),
-        ];
-        if self.config.transports.is_empty() {
-            lines.push("  (none)".to_string());
-        } else {
-            let mut names: Vec<_> = self.config.transports.keys().collect();
-            names.sort();
-            for name in names {
-                let t = &self.config.transports[name];
-                let status = if t.enabled { "enabled" } else { "disabled" };
-                let port_str = t.port.map(|p| format!(":{}", p)).unwrap_or_default();
-                lines.push(format!("  {:<22} {} {}", name, status, port_str));
-            }
-        }
-        if let Some(ref tls) = self.tls_fingerprint {
-            lines.push(String::new());
-            lines.push(format!("TLS fingerprint: {}", tls));
-        }
-        if let Some(ref pr) = self.config.push_relay {
-            lines.push(String::new());
-            lines.push(format!("Push relay: {}", pr.url));
-        }
-        lines.join("\n")
-    }
 }
 
 // ── Background async helpers ─────────────────────────────────────────────────
