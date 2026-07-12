@@ -33,6 +33,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/status",      "Show configuration status"),
     ("/test-push",   "Send a test push notification"),
     ("/reconnect",   "Restart all transports"),
+    ("/keep-alive",  "Toggle prevent-sleep (on by default)"),
     ("/config",      "Reconfigure bridge settings"),
     ("/help",        "List commands"),
     ("/quit",        "Exit the bridge"),
@@ -83,6 +84,9 @@ pub struct App {
 
     // Whether quit was requested.
     quit: bool,
+
+    // Keep-alive guard — held while keep_alive is enabled; dropped to release.
+    keepalive: Option<keepawake::KeepAwake>,
 }
 
 impl App {
@@ -93,6 +97,17 @@ impl App {
         // When no wizard is needed there's exactly one enabled transport — pre-select it.
         let selected_transport = if wizard.is_none() {
             config.enabled_transports().first().map(|(n, _)| n.to_string())
+        } else {
+            None
+        };
+
+        let keepalive = if config.keep_alive {
+            keepawake::Builder::default()
+                .display(false)
+                .idle(true)
+                .sleep(true)
+                .create()
+                .ok()
         } else {
             None
         };
@@ -119,6 +134,7 @@ impl App {
             bridge_shutdown: None,
             event_tx,
             quit: false,
+            keepalive,
         }
     }
 
@@ -150,6 +166,7 @@ impl App {
                             transport_addr: self.transport_addr.clone(),
                             transport_up: self.transport_up,
                             push_up: self.push_up,
+                            keep_alive: self.config.keep_alive,
                         };
                         // Build autocomplete entries for the renderer (no allocation if empty).
                         let ac_entries: Vec<AcEntry<'_>> = self.ac_matches.iter().map(|&i| AcEntry {
@@ -676,6 +693,9 @@ impl App {
             "/test-push" => {
                 self.handle_test_push();
             }
+            "/keep-alive" => {
+                self.toggle_keep_alive();
+            }
             "/config" => {
                 // Re-run wizard from the beginning.
                 self.wizard = Some(WizardState {
@@ -707,6 +727,23 @@ impl App {
             let _ = event_tx.send(AppEvent::TestPushResult(result)).await;
         });
         self.log_push("Sending test push notification...".to_string());
+    }
+
+    fn toggle_keep_alive(&mut self) {
+        self.config.keep_alive = !self.config.keep_alive;
+        if self.config.keep_alive {
+            self.keepalive = keepawake::Builder::default()
+                .display(false)
+                .idle(true)
+                .sleep(true)
+                .create()
+                .ok();
+            self.log_push("Keep-alive enabled — system sleep prevented.".to_string());
+        } else {
+            self.keepalive = None;
+            self.log_push("Keep-alive disabled — system may sleep normally.".to_string());
+        }
+        let _ = self.config.save();
     }
 
     fn handle_bridge_event(&mut self, event: BridgeEvent) {

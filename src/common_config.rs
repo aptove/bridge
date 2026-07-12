@@ -106,7 +106,13 @@ pub struct CommonConfig {
     /// Override the advertised LAN address in the QR / pairing URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advertise_addr: Option<String>,
+
+    /// Prevent system sleep while the bridge is running (default: true).
+    #[serde(default = "keep_alive_default")]
+    pub keep_alive: bool,
 }
+
+fn keep_alive_default() -> bool { true }
 
 /// Configuration for a single transport.
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -153,6 +159,7 @@ impl Default for CommonConfig {
             agent_command: None,
             bind_address: None,
             advertise_addr: None,
+            keep_alive: true,
         }
     }
 }

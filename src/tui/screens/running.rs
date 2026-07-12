@@ -17,6 +17,7 @@ pub struct RunningState {
     pub transport_addr: String,
     pub transport_up: bool,
     pub push_up: bool,
+    pub keep_alive: bool,
 }
 
 pub fn render_running(
@@ -44,7 +45,7 @@ pub fn render_running(
         addr: state.transport_addr.clone(),
         up: state.transport_up,
     }];
-    render_status_bar(frame, chunks[0], version, &transports, state.push_up);
+    render_status_bar(frame, chunks[0], version, &transports, state.push_up, state.keep_alive);
     render_log_panel(frame, chunks[1], logs, log_scroll);
     render_input_bar(frame, chunks[2], input, "type /help for commands", autocomplete);
 }

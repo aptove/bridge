@@ -17,6 +17,7 @@ pub fn render_status_bar(
     version: &str,
     transports: &[TransportState],
     push_up: bool,
+    keep_alive: bool,
 ) {
     let mut parts = vec![format!(" Aptove Bridge v{}", version)];
 
@@ -28,6 +29,9 @@ pub fn render_status_bar(
     if push_up {
         parts.push("  [push ◉]".to_string());
     }
+
+    let awake_icon = if keep_alive { "◉" } else { "○" };
+    parts.push(format!("  [awake {}]", awake_icon));
 
     let text = parts.join("");
     let para = Paragraph::new(text)
