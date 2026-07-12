@@ -1,3 +1,5 @@
+use std::sync::{Arc, atomic::{AtomicU8, Ordering}};
+
 use anyhow::Result;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyModifiers},
@@ -13,7 +15,7 @@ use crate::common_config::{CommonConfig, PushRelayConfig, TransportConfig};
 use crate::tui::{
     events::{AppEvent, BridgeEvent},
     screens::{
-        popup::{render_popup, PopupKind},
+        popup::{render_popup, PopupKind, LOG_LEVELS},
         running::{render_running, RunningState},
         wizard::{
             compute_transport_statuses, render_wizard, wizard_backspace, wizard_confirm_agent,
@@ -34,6 +36,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/test-push",   "Send a test push notification"),
     ("/reconnect",   "Restart all transports"),
     ("/keep-alive",  "Toggle prevent-sleep (on by default)"),
+    ("/log-level",   "Change log verbosity (default: WARN)"),
     ("/config",      "Reconfigure bridge settings"),
     ("/help",        "List commands"),
     ("/quit",        "Exit the bridge"),
@@ -87,10 +90,13 @@ pub struct App {
 
     // Keep-alive guard — held while keep_alive is enabled; dropped to release.
     keepalive: Option<keepawake::KeepAwake>,
+
+    // Shared with TuiLogLayer — written here, read in on_event().
+    log_level_arc: Arc<AtomicU8>,
 }
 
 impl App {
-    pub fn new(config: CommonConfig, event_tx: mpsc::Sender<AppEvent>) -> Self {
+    pub fn new(config: CommonConfig, event_tx: mpsc::Sender<AppEvent>, log_level_arc: Arc<AtomicU8>) -> Self {
         let wizard = WizardState::compute(&config);
         let screen = if wizard.is_some() { Screen::Wizard } else { Screen::Running };
 
@@ -135,6 +141,7 @@ impl App {
             event_tx,
             quit: false,
             keepalive,
+            log_level_arc,
         }
     }
 
@@ -567,11 +574,9 @@ impl App {
     }
 
     async fn handle_running_key(&mut self, key: crossterm::event::KeyEvent) {
-        // Popup dismissal.
+        // Route to popup handler when a popup is open.
         if self.popup.is_some() {
-            if key.code == KeyCode::Esc || key.code == KeyCode::Enter {
-                self.popup = None;
-            }
+            self.handle_popup_key(key).await;
             return;
         }
 
@@ -696,6 +701,11 @@ impl App {
             "/keep-alive" => {
                 self.toggle_keep_alive();
             }
+            "/log-level" => {
+                let current_u8 = self.log_level_arc.load(Ordering::Relaxed);
+                let selected = LOG_LEVELS.iter().position(|&(_, v)| v == current_u8).unwrap_or(1);
+                self.popup = Some(PopupKind::LogLevel { selected });
+            }
             "/config" => {
                 // Re-run wizard from the beginning.
                 self.wizard = Some(WizardState {
@@ -727,6 +737,38 @@ impl App {
             let _ = event_tx.send(AppEvent::TestPushResult(result)).await;
         });
         self.log_push("Sending test push notification...".to_string());
+    }
+
+    async fn handle_popup_key(&mut self, key: crossterm::event::KeyEvent) {
+        match self.popup.clone() {
+            Some(PopupKind::LogLevel { selected }) => {
+                match key.code {
+                    KeyCode::Up => {
+                        self.popup = Some(PopupKind::LogLevel { selected: selected.saturating_sub(1) });
+                    }
+                    KeyCode::Down => {
+                        self.popup = Some(PopupKind::LogLevel { selected: (selected + 1).min(LOG_LEVELS.len() - 1) });
+                    }
+                    KeyCode::Enter => {
+                        let (name, level_u8) = LOG_LEVELS[selected];
+                        self.log_level_arc.store(level_u8, Ordering::Relaxed);
+                        self.config.log_level = name.to_string();
+                        let _ = self.config.save();
+                        self.log_push(format!("Log level set to {}", name));
+                        self.popup = None;
+                    }
+                    KeyCode::Esc => {
+                        self.popup = None;
+                    }
+                    _ => {}
+                }
+            }
+            _ => {
+                if key.code == KeyCode::Esc || key.code == KeyCode::Enter {
+                    self.popup = None;
+                }
+            }
+        }
     }
 
     fn toggle_keep_alive(&mut self) {

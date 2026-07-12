@@ -110,9 +110,14 @@ pub struct CommonConfig {
     /// Prevent system sleep while the bridge is running (default: true).
     #[serde(default = "keep_alive_default")]
     pub keep_alive: bool,
+
+    /// Minimum log level shown in the TUI (ERROR / WARN / INFO / DEBUG / TRACE).
+    #[serde(default = "log_level_default")]
+    pub log_level: String,
 }
 
 fn keep_alive_default() -> bool { true }
+fn log_level_default() -> String { "WARN".to_string() }
 
 /// Configuration for a single transport.
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -160,6 +165,7 @@ impl Default for CommonConfig {
             bind_address: None,
             advertise_addr: None,
             keep_alive: true,
+            log_level: "WARN".to_string(),
         }
     }
 }

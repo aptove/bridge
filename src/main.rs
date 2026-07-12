@@ -1,3 +1,5 @@
+use std::sync::{Arc, atomic::AtomicU8};
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tokio::sync::mpsc;
@@ -8,7 +10,7 @@ use bridge::config;
 use bridge::tui::{
     app::App,
     events::AppEvent,
-    log_layer::TuiLogLayer,
+    log_layer::{TuiLogLayer, level_name_to_u8},
 };
 
 #[derive(Parser)]
@@ -52,17 +54,24 @@ async fn main() -> Result<()> {
 
 /// Launch the full TUI (wizard if needed, then running screen).
 async fn run_tui() -> Result<()> {
+    // Load config early so we can read the saved log level.
+    let mut config = CommonConfig::load()?;
+    config.ensure_agent_id();
+    config.ensure_auth_token();
+    config.save()?;
+
     // Channel capacity: generous to avoid dropping log records.
     let (event_tx, event_rx) = mpsc::channel::<AppEvent>(512);
 
+    // Shared atomic for runtime log-level changes (App ↔ TuiLogLayer).
+    let log_level_arc = Arc::new(AtomicU8::new(level_name_to_u8(&config.log_level)));
+
     // Install tracing subscriber: TuiLogLayer captures records for the TUI.
+    // EnvFilter is "trace" so all events reach the layer; the layer filters by min_level.
     // No fmt layer — stdout would corrupt the ratatui alternate screen.
-    let log_layer = TuiLogLayer::new(event_tx.clone());
+    let log_layer = TuiLogLayer::new(event_tx.clone(), Arc::clone(&log_level_arc));
     tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with(tracing_subscriber::EnvFilter::new("trace"))
         .with(log_layer)
         .init();
 
@@ -94,13 +103,7 @@ async fn run_tui() -> Result<()> {
         }
     });
 
-    // Load (or initialise) config.
-    let mut config = CommonConfig::load()?;
-    config.ensure_agent_id();
-    config.ensure_auth_token();
-    config.save()?;
-
-    let app = App::new(config, event_tx);
+    let app = App::new(config, event_tx, log_level_arc);
     app.run(event_rx).await
 }
 
@@ -111,9 +114,10 @@ async fn run_tui() -> Result<()> {
 async fn run_setup_wizard() -> Result<()> {
     let (event_tx, event_rx) = mpsc::channel::<AppEvent>(512);
 
-    let log_layer = TuiLogLayer::new(event_tx.clone());
+    let log_level_arc = Arc::new(AtomicU8::new(2)); // WARN
+    let log_layer = TuiLogLayer::new(event_tx.clone(), Arc::clone(&log_level_arc));
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new("info"))
+        .with(tracing_subscriber::EnvFilter::new("trace"))
         .with(log_layer)
         .init();
 
@@ -149,6 +153,6 @@ async fn run_setup_wizard() -> Result<()> {
     // Remove any existing cloudflare transport so the wizard re-runs it.
     config.transports.remove("cloudflare");
 
-    let app = App::new(config, event_tx);
+    let app = App::new(config, event_tx, log_level_arc);
     app.run(event_rx).await
 }

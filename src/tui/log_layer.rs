@@ -1,3 +1,4 @@
+use std::sync::{Arc, atomic::{AtomicU8, Ordering}};
 use tokio::sync::mpsc;
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::Context;
@@ -5,27 +6,49 @@ use tracing_subscriber::Layer;
 
 use crate::tui::events::{AppEvent, LogRecord};
 
+/// Log level as a u8: ERROR=1  WARN=2  INFO=3  DEBUG=4  TRACE=5.
+pub fn level_to_u8(level: Level) -> u8 {
+    match level {
+        Level::ERROR => 1,
+        Level::WARN  => 2,
+        Level::INFO  => 3,
+        Level::DEBUG => 4,
+        Level::TRACE => 5,
+    }
+}
+
+/// Parse a level name string (case-insensitive) to its u8 value.
+/// Returns 2 (WARN) for unrecognised values.
+pub fn level_name_to_u8(name: &str) -> u8 {
+    match name.to_uppercase().as_str() {
+        "ERROR" => 1,
+        "WARN"  => 2,
+        "INFO"  => 3,
+        "DEBUG" => 4,
+        "TRACE" => 5,
+        _       => 2,
+    }
+}
+
 /// A `tracing` subscriber layer that forwards log records to the TUI event channel.
+///
+/// `min_level` is shared with the App so it can be changed at runtime via `/log-level`.
 pub struct TuiLogLayer {
     sender: mpsc::Sender<AppEvent>,
-    min_level: Level,
+    min_level: Arc<AtomicU8>,
 }
 
 impl TuiLogLayer {
-    pub fn new(sender: mpsc::Sender<AppEvent>) -> Self {
-        Self { sender, min_level: Level::INFO }
-    }
-
-    pub fn with_level(mut self, level: Level) -> Self {
-        self.min_level = level;
-        self
+    pub fn new(sender: mpsc::Sender<AppEvent>, min_level: Arc<AtomicU8>) -> Self {
+        Self { sender, min_level }
     }
 }
 
 impl<S: Subscriber> Layer<S> for TuiLogLayer {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let level = *event.metadata().level();
-        if level > self.min_level {
+        // Skip events that are more verbose than the current minimum.
+        if level_to_u8(level) > self.min_level.load(Ordering::Relaxed) {
             return;
         }
 
