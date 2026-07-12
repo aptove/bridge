@@ -13,5 +13,7 @@ pub mod pairing;
 pub mod push;
 pub mod qr;
 pub mod rate_limiter;
+pub mod runner;
 pub mod tailscale;
 pub mod tls;
+pub mod tui;

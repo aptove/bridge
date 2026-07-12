@@ -93,6 +93,19 @@ pub struct CommonConfig {
     /// or any required field is empty — no hardcoded defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_relay: Option<PushRelayConfig>,
+
+    /// Agent command to launch (e.g., "copilot --acp"). Stored here so the
+    /// wizard only asks once; previously it was a CLI flag on `bridge run`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_command: Option<String>,
+
+    /// TCP address to bind the WebSocket server (default: "0.0.0.0").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_address: Option<String>,
+
+    /// Override the advertised LAN address in the QR / pairing URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise_addr: Option<String>,
 }
 
 /// Configuration for a single transport.
@@ -137,6 +150,9 @@ impl Default for CommonConfig {
             transports,
             slash_commands: Vec::new(),
             push_relay: None,
+            agent_command: None,
+            bind_address: None,
+            advertise_addr: None,
         }
     }
 }

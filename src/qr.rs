@@ -44,7 +44,7 @@ fn save_qr_code_image(data: &str, path: &PathBuf) -> Result<()> {
 }
 
 /// Render a QR code to a string for terminal display
-fn render_qr_code(data: &str) -> Result<String> {
+pub fn render_qr_code(data: &str) -> Result<String> {
     // Use lower error correction to reduce QR code size
     let code = QrCode::with_error_correction_level(data.as_bytes(), EcLevel::L)
         .context("Failed to generate QR code")?;
