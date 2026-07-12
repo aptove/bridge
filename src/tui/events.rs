@@ -1,4 +1,4 @@
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyEvent, MouseEvent};
 use crate::common_config::TransportConfig;
 
 /// A single log record captured from the tracing subscriber.
@@ -30,6 +30,7 @@ pub enum BridgeEvent {
 #[derive(Debug)]
 pub enum AppEvent {
     Key(KeyEvent),
+    Mouse(MouseEvent),
     Bridge(BridgeEvent),
     Log(LogRecord),
     Tick,

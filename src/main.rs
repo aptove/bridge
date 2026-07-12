@@ -87,14 +87,15 @@ async fn run_tui() -> Result<()> {
         }
     });
 
-    // Keyboard input thread — crossterm::event::read() blocks.
+    // Keyboard/mouse input thread — crossterm::event::read() blocks.
     let key_tx = event_tx.clone();
     std::thread::spawn(move || loop {
         match crossterm::event::read() {
             Ok(crossterm::event::Event::Key(key)) => {
-                if key_tx.blocking_send(AppEvent::Key(key)).is_err() {
-                    break;
-                }
+                if key_tx.blocking_send(AppEvent::Key(key)).is_err() { break; }
+            }
+            Ok(crossterm::event::Event::Mouse(mouse)) => {
+                let _ = key_tx.blocking_send(AppEvent::Mouse(mouse));
             }
             Ok(crossterm::event::Event::Resize(w, h)) => {
                 let _ = key_tx.blocking_send(AppEvent::Resize(w, h));
@@ -136,9 +137,10 @@ async fn run_setup_wizard() -> Result<()> {
     std::thread::spawn(move || loop {
         match crossterm::event::read() {
             Ok(crossterm::event::Event::Key(key)) => {
-                if key_tx.blocking_send(AppEvent::Key(key)).is_err() {
-                    break;
-                }
+                if key_tx.blocking_send(AppEvent::Key(key)).is_err() { break; }
+            }
+            Ok(crossterm::event::Event::Mouse(mouse)) => {
+                let _ = key_tx.blocking_send(AppEvent::Mouse(mouse));
             }
             _ => {}
         }

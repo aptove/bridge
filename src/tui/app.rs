@@ -230,6 +230,7 @@ impl App {
                     self.log_scroll = 0;
                 }
             }
+            AppEvent::Mouse(mouse) => self.handle_mouse(mouse),
             AppEvent::Tick => {}
             AppEvent::Resize(_, _) => {}
             AppEvent::CloudflareSetupResult(result) => {
@@ -571,6 +572,26 @@ impl App {
                 })).await;
             }
         });
+    }
+
+    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        use crossterm::event::MouseEventKind;
+        if self.screen != Screen::Running || self.popup.is_some() {
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.log_scroll = self.log_scroll.saturating_add(3);
+                self.auto_scroll = false;
+            }
+            MouseEventKind::ScrollDown => {
+                self.log_scroll = self.log_scroll.saturating_sub(3);
+                if self.log_scroll == 0 {
+                    self.auto_scroll = true;
+                }
+            }
+            _ => {}
+        }
     }
 
     async fn handle_running_key(&mut self, key: crossterm::event::KeyEvent) {

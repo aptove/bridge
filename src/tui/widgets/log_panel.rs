@@ -2,7 +2,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem},
+    widgets::{List, ListItem, Paragraph},
     Frame,
 };
 
@@ -14,11 +14,18 @@ pub fn render_log_panel(
     logs: &[LogRecord],
     scroll_offset: usize,
 ) {
-    let visible_height = area.height.saturating_sub(2) as usize; // minus borders
+    // Top row: scroll indicator (empty when at tail, text when scrolled up).
+    let indicator_area = Rect { height: 1, ..area };
+    let log_area = Rect {
+        y: area.y + 1,
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    let visible_height = log_area.height as usize;
 
-    // scroll_offset = 0 means show the tail; larger = scrolled up.
+    // Clamp offset and compute the first visible log index.
     let total = logs.len();
-    let (start, clamped_offset) = if total > visible_height {
+    let (start, clamped_offset) = if total > visible_height && visible_height > 0 {
         let max_offset = total - visible_height;
         let offset = scroll_offset.min(max_offset);
         (max_offset - offset, offset)
@@ -26,13 +33,20 @@ pub fn render_log_panel(
         (0, 0)
     };
 
-    let title = if clamped_offset > 0 {
-        format!("Log  ↑ {} lines from bottom (↓/PgDn to resume) ", clamped_offset)
+    // Render scroll indicator.
+    let indicator = if clamped_offset > 0 {
+        format!(" ↑ {} lines from bottom  (↓ / PgDn to resume)", clamped_offset)
     } else {
-        "Log".to_string()
+        String::new()
     };
+    frame.render_widget(
+        Paragraph::new(indicator).style(Style::default().fg(Color::DarkGray)),
+        indicator_area,
+    );
 
-    let items: Vec<ListItem> = logs[start..start + (total - start).min(visible_height)]
+    // Render log lines — no borders, no block.
+    let end = (start + visible_height).min(total);
+    let items: Vec<ListItem> = logs[start..end]
         .iter()
         .map(|r| {
             let level_style = match r.level.trim() {
@@ -50,8 +64,5 @@ pub fn render_log_panel(
         })
         .collect();
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(title));
-
-    frame.render_widget(list, area);
+    frame.render_widget(List::new(items), log_area);
 }
