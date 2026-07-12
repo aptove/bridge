@@ -55,10 +55,9 @@ fn render_dropdown(frame: &mut Frame, input_area: Rect, ac: &AutocompleteState<'
     let count = ac.matches.len() as u16;
     let dropdown_height = count + 2; // borders
 
-    // Float upward from the top edge of the input bar.
+    // Float upward from the top edge of the input bar, full width.
     let y = input_area.y.saturating_sub(dropdown_height);
-    let width = input_area.width.min(52);
-    let dropdown_area = Rect { x: input_area.x + 1, y, width, height: dropdown_height };
+    let dropdown_area = Rect { x: input_area.x, y, width: input_area.width, height: dropdown_height };
 
     frame.render_widget(Clear, dropdown_area);
 
