@@ -34,9 +34,9 @@ pub fn render_running(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // status bar
             Constraint::Min(0),    // log panel
             Constraint::Length(3), // input bar
+            Constraint::Length(1), // status bar
         ])
         .split(area);
 
@@ -45,7 +45,7 @@ pub fn render_running(
         addr: state.transport_addr.clone(),
         up: state.transport_up,
     }];
-    render_status_bar(frame, chunks[0], version, &transports, state.push_up, state.keep_alive);
-    render_log_panel(frame, chunks[1], logs, log_scroll);
-    render_input_bar(frame, chunks[2], input, "type /help for commands", autocomplete);
+    render_log_panel(frame, chunks[0], logs, log_scroll);
+    render_input_bar(frame, chunks[1], input, "type /help for commands", autocomplete);
+    render_status_bar(frame, chunks[2], version, &transports, state.push_up, state.keep_alive);
 }

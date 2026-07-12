@@ -2,7 +2,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState},
+    widgets::{Block, Borders, List, ListItem},
     Frame,
 };
 
@@ -46,13 +46,5 @@ pub fn render_log_panel(
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title("Log"));
 
-    let mut state = ListState::default();
-    if !logs.is_empty() {
-        let visible_count = (total - start).min(visible_height);
-        if visible_count > 0 {
-            state.select(Some(visible_count - 1));
-        }
-    }
-
-    frame.render_stateful_widget(list, area, &mut state);
+    frame.render_widget(list, area);
 }
