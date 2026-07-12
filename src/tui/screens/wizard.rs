@@ -107,23 +107,6 @@ impl WizardState {
             }
         }
 
-        // 4. Push not configured?
-        if config.push_relay.is_none() {
-            return Some(Self {
-                step: WizardStep::PushSetup {
-                    fields: [
-                        "https://token.aptove.com".to_string(),
-                        "https://push.aptove.com".to_string(),
-                        String::new(),
-                        String::new(),
-                    ],
-                    field_idx: 0,
-                    error: None,
-                },
-                reconnect_mode: false,
-            });
-        }
-
         None
     }
 

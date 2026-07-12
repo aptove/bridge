@@ -15,7 +15,7 @@ use crate::common_config::{CommonConfig, PushRelayConfig, TransportConfig};
 use crate::tui::{
     events::{AppEvent, BridgeEvent},
     screens::{
-        popup::{render_popup, PopupKind, LOG_LEVELS},
+        popup::{render_popup, PopupKind, LOG_LEVELS, PushPopupStep},
         running::{render_running, RunningState},
         wizard::{
             compute_transport_statuses, render_wizard, wizard_backspace, wizard_confirm_agent,
@@ -33,6 +33,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const COMMANDS: &[(&str, &str)] = &[
     ("/qr",          "Show QR pairing code"),
     ("/test-push",   "Send a test push notification"),
+    ("/push",        "Configure push notifications"),
     ("/reconnect",   "Restart all transports"),
     ("/keep-alive",  "Toggle prevent-sleep (on by default)"),
     ("/log-level",   "Change log verbosity (default: WARN)"),
@@ -117,10 +118,19 @@ impl App {
             None
         };
 
+        // If no wizard is needed but push isn't configured, auto-open the push menu.
+        let popup = if wizard.is_none() && config.push_relay.is_none() {
+            Some(PopupKind::PushConfig {
+                step: PushPopupStep::Menu { selected: 0, active: 0 },
+            })
+        } else {
+            None
+        };
+
         Self {
             screen,
             wizard,
-            popup: None,
+            popup,
             config,
             transport_name: String::new(),
             transport_addr: String::new(),
@@ -490,23 +500,7 @@ impl App {
     }
 
     async fn advance_wizard_after_transport(&mut self) {
-        // Check if push needs setup.
-        if self.config.push_relay.is_none() {
-            if let Some(ref mut w) = self.wizard {
-                w.step = WizardStep::PushSetup {
-                    fields: [
-                        "https://token.aptove.com".to_string(),
-                        "https://push.aptove.com".to_string(),
-                        String::new(),
-                        String::new(),
-                    ],
-                    field_idx: 0,
-                    error: None,
-                };
-            }
-        } else {
-            self.finish_wizard();
-        }
+        self.finish_wizard();
     }
 
     fn advance_past_push(&mut self) {
@@ -520,6 +514,12 @@ impl App {
         self.screen = Screen::Running;
         self.wizard = None;
         self.start_bridge();
+        // Auto-open push config if not yet set.
+        if self.config.push_relay.is_none() {
+            self.popup = Some(PopupKind::PushConfig {
+                step: PushPopupStep::Menu { selected: 0, active: 0 },
+            });
+        }
     }
 
     async fn handle_cloudflare_result(&mut self, result: Result<TransportConfig, String>) {
@@ -724,6 +724,12 @@ impl App {
             "/test-push" => {
                 self.handle_test_push();
             }
+            "/push" => {
+                let active = push_active_index(&self.config);
+                self.popup = Some(PopupKind::PushConfig {
+                    step: PushPopupStep::Menu { selected: active, active },
+                });
+            }
             "/keep-alive" => {
                 self.toggle_keep_alive();
             }
@@ -789,11 +795,176 @@ impl App {
                     _ => {}
                 }
             }
-            _ => {
+            Some(PopupKind::PushConfig { step }) => {
+            self.handle_push_popup_key(key, step).await;
+        }
+        _ => {
                 if key.code == KeyCode::Esc || key.code == KeyCode::Enter {
                     self.popup = None;
                 }
             }
+        }
+    }
+
+    async fn handle_push_popup_key(&mut self, key: crossterm::event::KeyEvent, step: PushPopupStep) {
+        match step {
+            PushPopupStep::Menu { selected, active } => match key.code {
+                KeyCode::Up => {
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::Menu { selected: selected.saturating_sub(1), active },
+                    });
+                }
+                KeyCode::Down => {
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::Menu { selected: (selected + 1).min(2), active },
+                    });
+                }
+                KeyCode::Enter => match selected {
+                    0 => {
+                        // No Push
+                        self.config.push_relay = None;
+                        let _ = self.config.save();
+                        self.log_push("Push disabled. Messages are buffered until the client reconnects.".to_string());
+                        self.popup = None;
+                    }
+                    1 => {
+                        // Aptove
+                        let (cid, csec) = match &self.config.push_relay {
+                            Some(pr) if pr.url.contains("aptove.com") => (pr.client_id.clone(), pr.client_secret.clone()),
+                            _ => (String::new(), String::new()),
+                        };
+                        self.popup = Some(PopupKind::PushConfig {
+                            step: PushPopupStep::AptoveForm { fields: [cid, csec], field_idx: 0, error: None },
+                        });
+                    }
+                    _ => {
+                        // Self Managed
+                        let (pu, tu, cid, csec) = match &self.config.push_relay {
+                            Some(pr) if !pr.url.contains("aptove.com") => {
+                                (pr.url.clone(), pr.token_url.clone(), pr.client_id.clone(), pr.client_secret.clone())
+                            }
+                            _ => (String::new(), String::new(), String::new(), String::new()),
+                        };
+                        self.popup = Some(PopupKind::PushConfig {
+                            step: PushPopupStep::SelfManagedForm { fields: [pu, tu, cid, csec], field_idx: 0, error: None },
+                        });
+                    }
+                }
+                KeyCode::Esc => { self.popup = None; }
+                _ => {}
+            },
+
+            PushPopupStep::AptoveForm { mut fields, field_idx, .. } => match key.code {
+                KeyCode::Char(c) => {
+                    fields[field_idx].push(c);
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::AptoveForm { fields, field_idx, error: None },
+                    });
+                }
+                KeyCode::Backspace => {
+                    fields[field_idx].pop();
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::AptoveForm { fields, field_idx, error: None },
+                    });
+                }
+                KeyCode::Tab => {
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::AptoveForm { fields, field_idx: (field_idx + 1) % 2, error: None },
+                    });
+                }
+                KeyCode::Enter => {
+                    if field_idx < 1 {
+                        self.popup = Some(PopupKind::PushConfig {
+                            step: PushPopupStep::AptoveForm { fields, field_idx: field_idx + 1, error: None },
+                        });
+                    } else {
+                        let client_id = fields[0].trim().to_string();
+                        let client_secret = fields[1].trim().to_string();
+                        if client_id.is_empty() || client_secret.is_empty() {
+                            self.popup = Some(PopupKind::PushConfig {
+                                step: PushPopupStep::AptoveForm {
+                                    fields, field_idx,
+                                    error: Some("Client ID and Secret are required.".to_string()),
+                                },
+                            });
+                        } else {
+                            self.config.push_relay = Some(PushRelayConfig {
+                                url: "https://push.aptove.com".to_string(),
+                                token_url: "https://token.aptove.com".to_string(),
+                                client_id,
+                                client_secret,
+                            });
+                            let _ = self.config.save();
+                            self.log_push("Aptove push service configured.".to_string());
+                            self.popup = None;
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    let active = push_active_index(&self.config);
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::Menu { selected: 1, active },
+                    });
+                }
+                _ => {}
+            },
+
+            PushPopupStep::SelfManagedForm { mut fields, field_idx, .. } => match key.code {
+                KeyCode::Char(c) => {
+                    fields[field_idx].push(c);
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::SelfManagedForm { fields, field_idx, error: None },
+                    });
+                }
+                KeyCode::Backspace => {
+                    fields[field_idx].pop();
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::SelfManagedForm { fields, field_idx, error: None },
+                    });
+                }
+                KeyCode::Tab => {
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::SelfManagedForm { fields, field_idx: (field_idx + 1) % 4, error: None },
+                    });
+                }
+                KeyCode::Enter => {
+                    if field_idx < 3 {
+                        self.popup = Some(PopupKind::PushConfig {
+                            step: PushPopupStep::SelfManagedForm { fields, field_idx: field_idx + 1, error: None },
+                        });
+                    } else {
+                        let push_url = fields[0].trim().to_string();
+                        let token_url = fields[1].trim().to_string();
+                        let client_id = fields[2].trim().to_string();
+                        let client_secret = fields[3].trim().to_string();
+                        if push_url.is_empty() || token_url.is_empty() || client_id.is_empty() || client_secret.is_empty() {
+                            self.popup = Some(PopupKind::PushConfig {
+                                step: PushPopupStep::SelfManagedForm {
+                                    fields, field_idx,
+                                    error: Some("All fields are required.".to_string()),
+                                },
+                            });
+                        } else {
+                            self.config.push_relay = Some(PushRelayConfig {
+                                url: push_url,
+                                token_url,
+                                client_id,
+                                client_secret,
+                            });
+                            let _ = self.config.save();
+                            self.log_push("Self-managed push service configured.".to_string());
+                            self.popup = None;
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    let active = push_active_index(&self.config);
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::Menu { selected: 2, active },
+                    });
+                }
+                _ => {}
+            },
         }
     }
 
@@ -932,6 +1103,15 @@ async fn run_cloudflare_setup(
         domain: Some(domain),
         subdomain: Some(subdomain),
     })
+}
+
+/// Returns 0 = No Push, 1 = Aptove, 2 = Self Managed.
+fn push_active_index(config: &CommonConfig) -> usize {
+    match &config.push_relay {
+        None => 0,
+        Some(pr) if pr.url.contains("aptove.com") => 1,
+        Some(_) => 2,
+    }
 }
 
 use crate::tui::screens::wizard::AGENTS;
