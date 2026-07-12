@@ -18,14 +18,21 @@ pub fn render_log_panel(
 
     // scroll_offset = 0 means show the tail; larger = scrolled up.
     let total = logs.len();
-    let start = if total > visible_height {
-        let max_start = total - visible_height;
-        max_start.saturating_sub(scroll_offset)
+    let (start, clamped_offset) = if total > visible_height {
+        let max_offset = total - visible_height;
+        let offset = scroll_offset.min(max_offset);
+        (max_offset - offset, offset)
     } else {
-        0
+        (0, 0)
     };
 
-    let items: Vec<ListItem> = logs[start..]
+    let title = if clamped_offset > 0 {
+        format!("Log  ↑ {} lines from bottom (↓/PgDn to resume) ", clamped_offset)
+    } else {
+        "Log".to_string()
+    };
+
+    let items: Vec<ListItem> = logs[start..start + (total - start).min(visible_height)]
         .iter()
         .map(|r| {
             let level_style = match r.level.trim() {
@@ -44,7 +51,7 @@ pub fn render_log_panel(
         .collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Log"));
+        .block(Block::default().borders(Borders::ALL).title(title));
 
     frame.render_widget(list, area);
 }

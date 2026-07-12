@@ -588,12 +588,24 @@ impl App {
                 self.update_autocomplete();
             }
 
-            // Up/Down: navigate autocomplete when open, else scroll log.
-            KeyCode::Up if ac_open => {
-                self.ac_idx = self.ac_idx.saturating_sub(1);
+            // Up/Down: navigate autocomplete when open, scroll log otherwise.
+            KeyCode::Up => {
+                if ac_open {
+                    self.ac_idx = self.ac_idx.saturating_sub(1);
+                } else {
+                    self.log_scroll = self.log_scroll.saturating_add(1);
+                    self.auto_scroll = false;
+                }
             }
-            KeyCode::Down if ac_open => {
-                self.ac_idx = (self.ac_idx + 1).min(self.ac_matches.len().saturating_sub(1));
+            KeyCode::Down => {
+                if ac_open {
+                    self.ac_idx = (self.ac_idx + 1).min(self.ac_matches.len().saturating_sub(1));
+                } else {
+                    self.log_scroll = self.log_scroll.saturating_sub(1);
+                    if self.log_scroll == 0 {
+                        self.auto_scroll = true;
+                    }
+                }
             }
 
             // Tab: accept the selected suggestion (complete input, don't submit).
@@ -632,10 +644,8 @@ impl App {
                 self.auto_scroll = false;
             }
             KeyCode::PageDown => {
-                if self.log_scroll > 10 {
-                    self.log_scroll -= 10;
-                } else {
-                    self.log_scroll = 0;
+                self.log_scroll = self.log_scroll.saturating_sub(10);
+                if self.log_scroll == 0 {
                     self.auto_scroll = true;
                 }
             }
