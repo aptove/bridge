@@ -192,17 +192,27 @@ pub fn tailscale_serve_start(port: u16) -> Result<TailscaleServeGuard> {
     const HTTPS_PORT: u16 = 443;
     info!("🔧 Configuring tailscale serve → localhost:{}", port);
     let backend = format!("http://localhost:{}", port);
-    let status = Command::new("tailscale")
+    let output = Command::new("tailscale")
         .args(["serve", "--bg", &format!("--https={}", HTTPS_PORT), &backend])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .output()
         .context("Failed to run 'tailscale serve'")?;
-    if !status.success() {
+    // Forward tailscale's output through tracing so it appears in the TUI log
+    // rather than being printed raw to the terminal (which corrupts the display).
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if !line.trim().is_empty() {
+            info!("tailscale serve: {}", line);
+        }
+    }
+    for line in String::from_utf8_lossy(&output.stderr).lines() {
+        if !line.trim().is_empty() {
+            info!("tailscale serve: {}", line);
+        }
+    }
+    if !output.status.success() {
         anyhow::bail!(
             "tailscale serve failed (exit {}). \
              Ensure MagicDNS and HTTPS are enabled: https://tailscale.com/kb/1153/enabling-https",
-            status
+            output.status
         );
     }
     Ok(TailscaleServeGuard::new(HTTPS_PORT))
