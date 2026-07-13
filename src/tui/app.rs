@@ -239,8 +239,8 @@ impl App {
             AppEvent::Bridge(ev) => self.handle_bridge_event(ev),
             AppEvent::Log(record) => {
                 self.logs.push(record);
-                if self.logs.len() > 2000 {
-                    self.logs.drain(0..200);
+                if self.logs.len() > 10_000 {
+                    self.logs.drain(0..1_000);
                 }
                 if self.auto_scroll {
                     self.log_scroll = 0;
