@@ -167,6 +167,9 @@ impl App {
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
+        // Clear any previous terminal content so it doesn't bleed through.
+        terminal.clear()?;
+
         // If no wizard needed, start bridge immediately.
         if self.screen == Screen::Running {
             self.start_bridge();
@@ -248,7 +251,9 @@ impl App {
             }
             AppEvent::Mouse(mouse) => self.handle_mouse(mouse),
             AppEvent::Tick => {}
-            AppEvent::Resize(_, _) => {}
+            AppEvent::Resize(w, h) => {
+                self.term_area = Rect { x: 0, y: 0, width: w, height: h };
+            }
             AppEvent::CloudflareSetupResult(result) => {
                 self.handle_cloudflare_result(result).await;
             }
