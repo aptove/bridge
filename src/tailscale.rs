@@ -194,6 +194,8 @@ pub fn tailscale_serve_start(port: u16) -> Result<TailscaleServeGuard> {
     let backend = format!("http://localhost:{}", port);
     let status = Command::new("tailscale")
         .args(["serve", "--bg", &format!("--https={}", HTTPS_PORT), &backend])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .context("Failed to run 'tailscale serve'")?;
     if !status.success() {
