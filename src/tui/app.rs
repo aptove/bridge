@@ -97,6 +97,10 @@ pub struct App {
 
     // Terminal size — updated each frame; used for popup URL hit-testing.
     term_area: Rect,
+
+    // When true, call terminal.clear() before the next draw to flush
+    // artifacts left by dismissed wizards or popups.
+    needs_clear: bool,
 }
 
 impl App {
@@ -156,6 +160,7 @@ impl App {
             keepalive,
             log_level_arc,
             term_area: Rect::default(),
+            needs_clear: false,
         }
     }
 
@@ -179,6 +184,10 @@ impl App {
         loop {
             if let Ok(size) = terminal.size() {
                 self.term_area = Rect { x: 0, y: 0, width: size.width, height: size.height };
+            }
+            if self.needs_clear {
+                self.needs_clear = false;
+                terminal.clear()?;
             }
             terminal.draw(|frame| {
                 match self.screen {
@@ -520,12 +529,20 @@ impl App {
         self.finish_wizard();
     }
 
+    /// Close the active popup and schedule a full clear before the next draw
+    /// so no artifact cells from the popup linger on screen.
+    fn close_popup(&mut self) {
+        self.close_popup();
+        self.needs_clear = true;
+    }
+
     fn finish_wizard(&mut self) {
         if let Some(ref mut w) = self.wizard {
             w.step = WizardStep::Done;
         }
         self.screen = Screen::Running;
         self.wizard = None;
+        self.needs_clear = true;
         self.start_bridge();
         // Auto-open push config if not yet set.
         if self.config.push_relay.is_none() {
@@ -744,6 +761,7 @@ impl App {
                 let reconnect_wizard = WizardState::for_reconnect(&self.config, active);
                 self.wizard = Some(reconnect_wizard);
                 self.screen = Screen::Wizard;
+                self.needs_clear = true;
                 self.log_push("Stopped bridge. Choose a transport to reconnect.".to_string());
             }
             "/test-push" => {
@@ -775,6 +793,7 @@ impl App {
                     reconnect_mode: false,
                 });
                 self.screen = Screen::Wizard;
+                self.needs_clear = true;
             }
             other => {
                 self.log_push(format!("Unknown command: {}  (type /help for list)", other));
@@ -817,10 +836,10 @@ impl App {
                         self.config.log_level = name.to_string();
                         let _ = self.config.save();
                         self.log_push(format!("Log level set to {}", name));
-                        self.popup = None;
+                        self.close_popup();
                     }
                     KeyCode::Esc => {
-                        self.popup = None;
+                        self.close_popup();
                     }
                     _ => {}
                 }
@@ -830,7 +849,7 @@ impl App {
         }
         _ => {
                 if key.code == KeyCode::Esc || key.code == KeyCode::Enter {
-                    self.popup = None;
+                    self.close_popup();
                 }
             }
         }
@@ -855,7 +874,7 @@ impl App {
                         self.config.push_relay = None;
                         let _ = self.config.save();
                         self.log_push("Push disabled. Messages are buffered until the client reconnects.".to_string());
-                        self.popup = None;
+                        self.close_popup();
                     }
                     1 => {
                         // Aptove
@@ -880,7 +899,7 @@ impl App {
                         });
                     }
                 }
-                KeyCode::Esc => { self.popup = None; }
+                KeyCode::Esc => { self.close_popup(); }
                 _ => {}
             },
 
@@ -926,7 +945,7 @@ impl App {
                             });
                             let _ = self.config.save();
                             self.log_push("Aptove push service configured.".to_string());
-                            self.popup = None;
+                            self.close_popup();
                         }
                     }
                 }
@@ -983,7 +1002,7 @@ impl App {
                             });
                             let _ = self.config.save();
                             self.log_push("Self-managed push service configured.".to_string());
-                            self.popup = None;
+                            self.close_popup();
                         }
                     }
                 }
