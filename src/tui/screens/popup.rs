@@ -43,7 +43,7 @@ const HELP_TEXT: &str = "\
 /qr           Show QR pairing code
 /test-push    Send a test push notification
 /push         Configure push notifications
-/reconnect    Restart all transports
+/reconnect    Restart the transport
 /keep-alive   Toggle prevent-sleep (on by default)
 /log-level    Change log verbosity
 /clear-logs   Clear the log view
