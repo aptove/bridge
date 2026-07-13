@@ -1,6 +1,7 @@
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Frame,
 };
@@ -128,11 +129,13 @@ fn render_push_menu(frame: &mut Frame, selected: usize, active: usize) {
         Rect { y: hint_y, height: 1, ..inner },
     );
 
-    // Footer docs link.
+    // Footer docs link (clickable).
     let footer_y = inner.y + inner.height.saturating_sub(1);
     frame.render_widget(
-        Paragraph::new(format!("Docs: {}", PUSH_DOC_URL))
-            .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(Line::from(vec![
+            Span::styled("Docs: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(PUSH_DOC_URL, Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED)),
+        ])),
         Rect { y: footer_y, height: 1, ..inner },
     );
 }
@@ -148,10 +151,12 @@ fn render_aptove_form(frame: &mut Frame, fields: &[String; 2], field_idx: usize,
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Registration link.
+    // Registration link (clickable).
     frame.render_widget(
-        Paragraph::new(format!("Register at: {}", PUSH_REGISTER_URL))
-            .style(Style::default().fg(Color::Cyan)),
+        Paragraph::new(Line::from(vec![
+            Span::styled("Register at: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(PUSH_REGISTER_URL, Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED)),
+        ])),
         Rect { y: inner.y + 1, height: 1, ..inner },
     );
 
@@ -226,9 +231,56 @@ fn push_footer(frame: &mut Frame, inner: Rect, error: Option<&str>, hint: &str) 
     );
     let footer_y = inner.y + inner.height.saturating_sub(1);
     frame.render_widget(
-        Paragraph::new(format!("Docs: {}", PUSH_DOC_URL)).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(Line::from(vec![
+            Span::styled("Docs: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(PUSH_DOC_URL, Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED)),
+        ])),
         Rect { y: footer_y, height: 1, ..inner },
     );
+}
+
+// ── URL hit-testing ───────────────────────────────────────────────────────────
+
+/// Return the static URL string if `(col, row)` lands on a clickable URL inside
+/// the current popup, given the terminal's full area.  Returns `None` otherwise.
+pub fn url_at(kind: &PopupKind, col: u16, row: u16, term: Rect) -> Option<&'static str> {
+    let on_row = |inner: Rect, y: u16| row == y && col >= inner.x && col < inner.x + inner.width;
+    let border_inner = |area: Rect| -> Rect {
+        // Block with all borders shrinks each side by 1.
+        Rect {
+            x: area.x + 1,
+            y: area.y + 1,
+            width: area.width.saturating_sub(2),
+            height: area.height.saturating_sub(2),
+        }
+    };
+
+    if let PopupKind::PushConfig { step } = kind {
+        match step {
+            PushPopupStep::Menu { .. } => {
+                let inner = border_inner(centered_rect(66, 55, term));
+                if on_row(inner, inner.y + inner.height.saturating_sub(1)) {
+                    return Some(PUSH_DOC_URL);
+                }
+            }
+            PushPopupStep::AptoveForm { .. } => {
+                let inner = border_inner(centered_rect(68, 62, term));
+                if on_row(inner, inner.y + 1) {
+                    return Some(PUSH_REGISTER_URL);
+                }
+                if on_row(inner, inner.y + inner.height.saturating_sub(1)) {
+                    return Some(PUSH_DOC_URL);
+                }
+            }
+            PushPopupStep::SelfManagedForm { .. } => {
+                let inner = border_inner(centered_rect(72, 72, term));
+                if on_row(inner, inner.y + inner.height.saturating_sub(1)) {
+                    return Some(PUSH_DOC_URL);
+                }
+            }
+        }
+    }
+    None
 }
 
 // ── Log level picker ──────────────────────────────────────────────────────────

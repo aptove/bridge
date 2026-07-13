@@ -1014,6 +1014,15 @@ where
         }
     }
     
+    // If push relay is configured, ask the client to send its push token.
+    // The bridge drives this so the client never needs to store pushRelayUrl.
+    if push_relay.is_some() {
+        let req = r#"{"jsonrpc":"2.0","method":"bridge/requestPushToken","params":{}}"#;
+        if let Err(e) = ws_sender.send(Message::Text(req.into())).await {
+            warn!("Failed to send bridge/requestPushToken: {}", e);
+        }
+    }
+
     // Create shutdown channel
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
     
@@ -1076,11 +1085,12 @@ where
                         debug!("📥 Received from Mobile ({} bytes): {}", text.len(),
                             text.chars().take(200).collect::<String>());
 
-                        // Intercept bridge/registerPushToken notifications
-                        if let Some(ref relay) = push_relay_for_register {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                                let method = v.get("method").and_then(|m| m.as_str());
-                                if method == Some("bridge/registerPushToken") {
+                        // Intercept bridge/registerPushToken and bridge/unregisterPushToken.
+                        // These are bridge-protocol messages; never forward them to the agent.
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                            let method = v.get("method").and_then(|m| m.as_str());
+                            if method == Some("bridge/registerPushToken") {
+                                if let Some(ref relay) = push_relay_for_register {
                                     if let Some(params) = v.get("params") {
                                         let platform = params.get("platform").and_then(|p| p.as_str()).unwrap_or("");
                                         let device_token = params.get("deviceToken").and_then(|t| t.as_str()).unwrap_or("");
@@ -1098,11 +1108,11 @@ where
                                             }
                                         });
                                     }
-                                    // Don't forward bridge-specific messages to agent
-                                    continue;
                                 }
-                                // Also handle unregisterPushToken
-                                if method == Some("bridge/unregisterPushToken") {
+                                continue; // Always skip — never forward to agent
+                            }
+                            if method == Some("bridge/unregisterPushToken") {
+                                if let Some(ref relay) = push_relay_for_register {
                                     if let Some(params) = v.get("params") {
                                         let device_token = params.get("deviceToken").and_then(|t| t.as_str()).unwrap_or("");
                                         info!("📲 Unregistering push token");
@@ -1114,8 +1124,8 @@ where
                                             }
                                         });
                                     }
-                                    continue;
                                 }
+                                continue; // Always skip — never forward to agent
                             }
                         }
 

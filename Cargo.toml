@@ -95,6 +95,9 @@ fs2 = "0.4"
 # Prevent system sleep while bridge is running (Mac/Windows/Linux)
 keepawake = "0.5"
 
+# Open URLs in the default browser (cross-platform)
+open = "5"
+
 # Constant-time comparison (prevents timing side-channel on pairing codes)
 subtle = "2"
 

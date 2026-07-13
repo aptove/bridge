@@ -6,7 +6,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
 use std::io;
 use tokio::sync::mpsc;
 use tracing::info;
@@ -15,7 +15,7 @@ use crate::common_config::{CommonConfig, PushRelayConfig, TransportConfig};
 use crate::tui::{
     events::{AppEvent, BridgeEvent},
     screens::{
-        popup::{render_popup, PopupKind, LOG_LEVELS, PushPopupStep},
+        popup::{render_popup, url_at, PopupKind, LOG_LEVELS, PushPopupStep},
         running::{render_running, RunningState},
         wizard::{
             compute_transport_statuses, render_wizard, wizard_backspace, wizard_confirm_agent,
@@ -93,6 +93,9 @@ pub struct App {
 
     // Shared with TuiLogLayer — written here, read in on_event().
     log_level_arc: Arc<AtomicU8>,
+
+    // Terminal size — updated each frame; used for popup URL hit-testing.
+    term_area: Rect,
 }
 
 impl App {
@@ -151,6 +154,7 @@ impl App {
             quit: false,
             keepalive,
             log_level_arc,
+            term_area: Rect::default(),
         }
     }
 
@@ -169,6 +173,9 @@ impl App {
 
         // Main event loop.
         loop {
+            if let Ok(size) = terminal.size() {
+                self.term_area = Rect { x: 0, y: 0, width: size.width, height: size.height };
+            }
             terminal.draw(|frame| {
                 match self.screen {
                     Screen::Wizard => {
@@ -573,7 +580,19 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
-        use crossterm::event::MouseEventKind;
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        // Left-click: check if it lands on a clickable URL in the active popup.
+        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+            if let Some(ref popup) = self.popup {
+                if let Some(url) = url_at(popup, mouse.column, mouse.row, self.term_area) {
+                    open::that(url).ok();
+                }
+            }
+            return;
+        }
+
+        // Scroll only when on the Running screen with no popup open.
         if self.screen != Screen::Running || self.popup.is_some() {
             return;
         }
