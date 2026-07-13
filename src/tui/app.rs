@@ -532,7 +532,7 @@ impl App {
     /// Close the active popup and schedule a full clear before the next draw
     /// so no artifact cells from the popup linger on screen.
     fn close_popup(&mut self) {
-        self.close_popup();
+        self.popup = None;
         self.needs_clear = true;
     }
 
