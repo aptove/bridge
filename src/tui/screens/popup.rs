@@ -46,6 +46,7 @@ const HELP_TEXT: &str = "\
 /reconnect    Restart all transports
 /keep-alive   Toggle prevent-sleep (on by default)
 /log-level    Change log verbosity
+/clear-logs   Clear the log view
 /config       Reconfigure bridge settings
 /help         Show this help
 /quit         Exit the bridge

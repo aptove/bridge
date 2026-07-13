@@ -37,6 +37,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/reconnect",   "Restart all transports"),
     ("/keep-alive",  "Toggle prevent-sleep (on by default)"),
     ("/log-level",   "Change log verbosity (default: WARN)"),
+    ("/clear-logs",  "Clear the log view"),
     ("/config",      "Reconfigure bridge settings"),
     ("/help",        "List commands"),
     ("/quit",        "Exit the bridge"),
@@ -756,6 +757,11 @@ impl App {
                 let current_u8 = self.log_level_arc.load(Ordering::Relaxed);
                 let selected = LOG_LEVELS.iter().position(|&(_, v)| v == current_u8).unwrap_or(1);
                 self.popup = Some(PopupKind::LogLevel { selected });
+            }
+            "/clear-logs" => {
+                self.logs.clear();
+                self.log_scroll = 0;
+                self.auto_scroll = true;
             }
             "/config" => {
                 // Re-run wizard from the beginning.
