@@ -145,20 +145,12 @@ pub struct TransportConfig {
 
 impl Default for CommonConfig {
     fn default() -> Self {
-        let mut transports = HashMap::new();
-        transports.insert(
-            "local".to_string(),
-            TransportConfig {
-                enabled: true,
-                port: Some(8765),
-                tls: Some(true),
-                ..Default::default()
-            },
-        );
+        // No transports pre-enabled: the setup wizard will ask the user to
+        // choose one on first run (or any time no transport is configured).
         Self {
             agent_id: String::new(),
             auth_token: String::new(),
-            transports,
+            transports: HashMap::new(),
             slash_commands: Vec::new(),
             push_relay: None,
             agent_command: None,

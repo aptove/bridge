@@ -13,6 +13,7 @@ pub fn render_log_panel(
     area: Rect,
     logs: &[LogRecord],
     scroll_offset: usize,
+    copy_hint: Option<&str>,
 ) {
     // Top row: scroll indicator (empty when at tail, text when scrolled up).
     let indicator_area = Rect { height: 1, ..area };
@@ -33,14 +34,19 @@ pub fn render_log_panel(
         (0, 0)
     };
 
-    // Render scroll indicator.
-    let indicator = if clamped_offset > 0 {
-        format!(" ↑ {} lines from bottom  (↓ / PgDn to resume)", clamped_offset)
+    // Render indicator row: copy hint takes priority over scroll info.
+    let (indicator_text, indicator_style) = if let Some(hint) = copy_hint {
+        (hint.to_string(), Style::default().fg(Color::Green))
+    } else if clamped_offset > 0 {
+        (
+            format!(" ↑ {} lines from bottom  (↓ / PgDn to resume)", clamped_offset),
+            Style::default().fg(Color::DarkGray),
+        )
     } else {
-        String::new()
+        (String::new(), Style::default())
     };
     frame.render_widget(
-        Paragraph::new(indicator).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(indicator_text).style(indicator_style),
         indicator_area,
     );
 

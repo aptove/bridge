@@ -47,7 +47,8 @@ const HELP_TEXT: &str = "\
 /keep-alive   Toggle prevent-sleep (on by default)
 /log-level    Change log verbosity
 /clear-logs   Clear the log view
-/config       Reconfigure bridge settings
+/copy-logs    Copy all logs to clipboard
+/agent        Change the AI agent
 /help         Show this help
 /quit         Exit the bridge
 ";

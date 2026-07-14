@@ -285,6 +285,10 @@ pub async fn run_bridge(
         }
     };
 
+    // Release the lock BEFORE sending BridgeStopped so that when the TUI
+    // starts a new bridge in response to that event, the lock is already free.
+    drop(_bridge_lock);
+
     let _ = event_tx.send(AppEvent::Bridge(BridgeEvent::BridgeStopped)).await;
 
     result

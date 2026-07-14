@@ -10,10 +10,11 @@ use crate::common_config::CommonConfig;
 use crate::tailscale::{is_tailscale_available, is_tailscale_installed};
 
 pub const AGENTS: &[(&str, &str)] = &[
-    ("GitHub Copilot", "copilot --acp"),
-    ("Google Gemini",  "gemini --experimental-acp"),
-    ("Goose AI",       "goose acp"),
-    ("Custom...",      ""),
+    ("GitHub Copilot",           "copilot --acp"),
+    ("Google Gemini",            "gemini --experimental-acp"),
+    ("Goose AI",                 "goose acp"),
+    ("Claude Code (Claude CLI)", "claude-acp"),
+    ("Custom...",                ""),
 ];
 
 pub const TRANSPORTS: &[&str] = &["local", "tailscale-serve", "cloudflare"];
@@ -66,6 +67,10 @@ pub struct WizardState {
     /// When `true` (triggered by `/reconnect`), skip agent and push setup
     /// steps — only pick transport, then start bridge immediately.
     pub reconnect_mode: bool,
+    /// When `true` (wizard opened from a running bridge via `/config` or
+    /// `/reconnect`), pressing Esc on any top-level step cancels the wizard
+    /// and returns to the running screen.
+    pub cancelable: bool,
 }
 
 impl WizardState {
@@ -75,7 +80,7 @@ impl WizardState {
     pub fn compute(config: &CommonConfig) -> Option<Self> {
         // 1. Agent command missing?
         if config.agent_command.is_none() {
-            return Some(Self { step: WizardStep::AgentSelect { selected: 0 }, reconnect_mode: false });
+            return Some(Self { step: WizardStep::AgentSelect { selected: 0 }, reconnect_mode: false, cancelable: false });
         }
 
         // 2. Transport selection:
@@ -90,6 +95,7 @@ impl WizardState {
             return Some(Self {
                 step: WizardStep::TransportPick { selected: 0, ts_available, ts_installed, statuses },
                 reconnect_mode: false,
+                cancelable: false,
             });
         }
 
@@ -103,6 +109,7 @@ impl WizardState {
                         error: None,
                     },
                     reconnect_mode: false,
+                    cancelable: false,
                 });
             }
         }
@@ -119,6 +126,7 @@ impl WizardState {
         Self {
             step: WizardStep::TransportPick { selected: 0, ts_available, ts_installed, statuses },
             reconnect_mode: true,
+            cancelable: true,
         }
     }
 }
@@ -245,7 +253,12 @@ pub fn wizard_confirm_agent(state: &WizardState) -> Option<Option<String>> {
 pub fn render_wizard(frame: &mut Frame, state: &WizardState) {
     match &state.step {
         WizardStep::AgentSelect { selected } => {
-            let inner = wizard_panel(frame, "Select Agent", "↑/↓ navigate   Enter confirm");
+            let hint = if state.cancelable {
+                "↑/↓ navigate   Enter confirm   Esc cancel"
+            } else {
+                "↑/↓ navigate   Enter confirm"
+            };
+            let inner = wizard_panel(frame, "Select Agent", hint);
             let items: Vec<ListItem> = AGENTS.iter().enumerate().map(|(i, (name, cmd))| {
                 let prefix = if i == *selected { "> " } else { "  " };
                 let label = if cmd.is_empty() {
@@ -279,7 +292,12 @@ pub fn render_wizard(frame: &mut Frame, state: &WizardState) {
             } else {
                 "Choose Transport for This Session"
             };
-            let inner = wizard_panel(frame, title, "↑/↓ navigate   Enter select   unconfigured → inline setup");
+            let pick_hint = if state.cancelable {
+                "↑/↓ navigate   Enter select   Esc cancel"
+            } else {
+                "↑/↓ navigate   Enter select   unconfigured → inline setup"
+            };
+            let inner = wizard_panel(frame, title, pick_hint);
             let items: Vec<ListItem> = TRANSPORTS.iter().enumerate().map(|(i, _)| {
                 let prefix = if i == *selected { "> " } else { "  " };
                 let text = format!("{}{:<30} {}", prefix, TRANSPORT_LABELS[i], statuses[i]);

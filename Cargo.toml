@@ -98,6 +98,9 @@ keepawake = "0.5"
 # Open URLs in the default browser (cross-platform)
 open = "5"
 
+# System clipboard access
+arboard = "3"
+
 # Constant-time comparison (prevents timing side-channel on pairing codes)
 subtle = "2"
 

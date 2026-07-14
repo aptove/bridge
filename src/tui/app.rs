@@ -6,7 +6,13 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::Rect,
+    style::{Color, Style},
+    widgets::{Block, Clear},
+    Terminal,
+};
 use std::io;
 use tokio::sync::mpsc;
 use tracing::info;
@@ -38,7 +44,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/keep-alive",  "Toggle prevent-sleep (on by default)"),
     ("/log-level",   "Change log verbosity (default: WARN)"),
     ("/clear-logs",  "Clear the log view"),
-    ("/config",      "Reconfigure bridge settings"),
+    ("/copy-logs",   "Copy all logs to clipboard"),
+    ("/agent",       "Change the AI agent"),
     ("/help",        "List commands"),
     ("/quit",        "Exit the bridge"),
 ];
@@ -101,6 +108,18 @@ pub struct App {
     // When true, call terminal.clear() before the next draw to flush
     // artifacts left by dismissed wizards or popups.
     needs_clear: bool,
+
+    // Countdown ticks for the "Copied!" indicator in the log panel (200ms per tick).
+    copy_hint_ticks: u8,
+
+    // When true, start_bridge() is called as soon as BridgeStopped is received.
+    // Used to avoid a lock-file race when restarting: the old bridge must fully
+    // release the lock before the new one starts.
+    restart_pending: bool,
+
+    // When true, open the QR popup as soon as the pairing URL is ready.
+    // Set after any wizard completion so the user can pair immediately.
+    show_qr_on_ready: bool,
 }
 
 impl App {
@@ -161,6 +180,9 @@ impl App {
             log_level_arc,
             term_area: Rect::default(),
             needs_clear: false,
+            copy_hint_ticks: 0,
+            restart_pending: false,
+            show_qr_on_ready: false,
         }
     }
 
@@ -192,6 +214,13 @@ impl App {
             terminal.draw(|frame| {
                 match self.screen {
                     Screen::Wizard => {
+                        // Full-screen dark background so no running-screen content bleeds through.
+                        // Clear first (resets cell symbols), then paint background black.
+                        frame.render_widget(Clear, frame.area());
+                        frame.render_widget(
+                            Block::default().style(Style::default().bg(Color::Black)),
+                            frame.area(),
+                        );
                         if let Some(ref wizard) = self.wizard {
                             render_wizard(frame, wizard);
                         }
@@ -203,6 +232,7 @@ impl App {
                             transport_up: self.transport_up,
                             push_up: self.push_up,
                             keep_alive: self.config.keep_alive,
+                            copy_hint: if self.copy_hint_ticks > 0 { Some(" Copied!") } else { None },
                         };
                         // Build autocomplete entries for the renderer (no allocation if empty).
                         let ac_entries: Vec<AcEntry<'_>> = self.ac_matches.iter().map(|&i| AcEntry {
@@ -216,6 +246,13 @@ impl App {
                         };
                         render_running(frame, &running_state, &self.logs, self.log_scroll, &self.input, VERSION, ac_state.as_ref());
                         if let Some(ref popup) = self.popup {
+                            // Dark overlay so log content doesn't show through the popup area.
+                            // Clear first (resets cell symbols), then paint background black.
+                            frame.render_widget(Clear, frame.area());
+                            frame.render_widget(
+                                Block::default().style(Style::default().bg(Color::Black)),
+                                frame.area(),
+                            );
                             render_popup(frame, popup, &self.qr_string);
                         }
                     }
@@ -259,7 +296,11 @@ impl App {
                 }
             }
             AppEvent::Mouse(mouse) => self.handle_mouse(mouse),
-            AppEvent::Tick => {}
+            AppEvent::Tick => {
+                if self.copy_hint_ticks > 0 {
+                    self.copy_hint_ticks -= 1;
+                }
+            }
             AppEvent::Resize(w, h) => {
                 self.term_area = Rect { x: 0, y: 0, width: w, height: h };
             }
@@ -306,6 +347,7 @@ impl App {
 
     async fn handle_wizard_escape(&mut self) {
         let Some(ref wizard) = self.wizard else { return };
+        let cancelable = wizard.cancelable;
         match &wizard.step {
             WizardStep::AgentCustomInput { .. } => {
                 // Back to agent select.
@@ -313,9 +355,24 @@ impl App {
                     w.step = WizardStep::AgentSelect { selected: AGENTS.len() - 1 };
                 }
             }
+            WizardStep::CloudflareSetup { .. } => {
+                // Back to transport picker.
+                let ts_available = crate::tailscale::is_tailscale_available();
+                let ts_installed = crate::tailscale::is_tailscale_installed();
+                let statuses = compute_transport_statuses(&self.config, self.selected_transport.as_deref(), ts_available, ts_installed);
+                if let Some(ref mut w) = self.wizard {
+                    w.step = WizardStep::TransportPick { selected: 0, ts_available, ts_installed, statuses };
+                }
+            }
             WizardStep::PushSetup { .. } => {
                 // Skip push setup.
                 self.advance_past_push();
+            }
+            _ if cancelable => {
+                // Cancel wizard and return to running screen.
+                self.wizard = None;
+                self.screen = Screen::Running;
+                self.needs_clear = true;
             }
             _ => {}
         }
@@ -537,13 +594,24 @@ impl App {
     }
 
     fn finish_wizard(&mut self) {
-        if let Some(ref mut w) = self.wizard {
-            w.step = WizardStep::Done;
-        }
-        self.screen = Screen::Running;
         self.wizard = None;
+        self.screen = Screen::Running;
         self.needs_clear = true;
-        self.start_bridge();
+        // Auto-show QR when the bridge comes up so the user can pair immediately.
+        self.show_qr_on_ready = true;
+
+        if let Some(tx) = self.bridge_shutdown.take() {
+            // Bridge is currently running — stop it and wait for BridgeStopped
+            // before starting the new one (avoids the lock-file race condition).
+            let _ = tx.send(());
+            self.transport_up = false;
+            self.restart_pending = true;
+        } else {
+            // Bridge already stopped (or never ran) — start immediately.
+            self.restart_pending = false;
+            self.start_bridge();
+        }
+
         // Auto-open push config if not yet set.
         if self.config.push_relay.is_none() {
             self.popup = Some(PopupKind::PushConfig {
@@ -615,7 +683,7 @@ impl App {
             return;
         }
 
-        // Scroll only when on the Running screen with no popup open.
+        // Remaining handlers only apply when on the Running screen with no popup.
         if self.screen != Screen::Running || self.popup.is_some() {
             return;
         }
@@ -630,7 +698,49 @@ impl App {
                     self.auto_scroll = true;
                 }
             }
+            // Right-click: copy the log line under the cursor to the clipboard.
+            MouseEventKind::Down(MouseButton::Right) => {
+                if let Some(text) = self.log_line_at(mouse.row) {
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        if cb.set_text(text).is_ok() {
+                            self.copy_hint_ticks = 10; // ~2 s at 200 ms/tick
+                        }
+                    }
+                }
+            }
             _ => {}
+        }
+    }
+
+    /// Return the full text of the log entry rendered at terminal row `row`,
+    /// or `None` if the row is outside the log area.
+    fn log_line_at(&self, row: u16) -> Option<String> {
+        // Layout (from running.rs): log panel = top (height - 4 rows), then
+        // input bar (3 rows), then status bar (1 row).
+        // Within the log panel: indicator row at y=0, log lines start at y=1.
+        let log_area_top: u16 = 1;
+        let log_area_bottom: u16 = self.term_area.height.saturating_sub(4); // exclusive
+        if row < log_area_top || row >= log_area_bottom {
+            return None;
+        }
+        let line_idx = (row - log_area_top) as usize;
+
+        let total = self.logs.len();
+        let visible_height = (log_area_bottom - log_area_top) as usize;
+        let start = if total > visible_height && visible_height > 0 {
+            let max_offset = total - visible_height;
+            let offset = self.log_scroll.min(max_offset);
+            max_offset - offset
+        } else {
+            0
+        };
+
+        let log_idx = start + line_idx;
+        if log_idx < total {
+            let r = &self.logs[log_idx];
+            Some(format!("{} {} {}", r.timestamp, r.level.trim(), r.message))
+        } else {
+            None
         }
     }
 
@@ -752,17 +862,14 @@ impl App {
                 self.quit = true;
             }
             "/reconnect" => {
-                // Stop the running bridge (if any), then show transport picker.
-                if let Some(tx) = self.bridge_shutdown.take() {
-                    let _ = tx.send(());
-                }
-                self.transport_up = false;
+                // Show transport picker; the running bridge stays up until the
+                // user confirms a transport, then finish_wizard() stops the old
+                // bridge and waits for BridgeStopped before starting the new one.
                 let active = self.selected_transport.as_deref();
                 let reconnect_wizard = WizardState::for_reconnect(&self.config, active);
                 self.wizard = Some(reconnect_wizard);
                 self.screen = Screen::Wizard;
                 self.needs_clear = true;
-                self.log_push("Stopped bridge. Choose a transport to reconnect.".to_string());
             }
             "/test-push" => {
                 self.handle_test_push();
@@ -786,11 +893,27 @@ impl App {
                 self.log_scroll = 0;
                 self.auto_scroll = true;
             }
-            "/config" => {
-                // Re-run wizard from the beginning.
+            "/copy-logs" => {
+                if !self.logs.is_empty() {
+                    let text: String = self.logs.iter()
+                        .map(|r| format!("{} {} {}", r.timestamp, r.level.trim(), r.message))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        if cb.set_text(text).is_ok() {
+                            self.copy_hint_ticks = 10;
+                        }
+                    }
+                }
+            }
+            "/agent" => {
+                // Show agent picker; after selection the wizard continues to
+                // transport pick (or auto-selects if only one is configured),
+                // then finish_wizard() restarts the bridge with the new agent.
                 self.wizard = Some(WizardState {
                     step: WizardStep::AgentSelect { selected: 0 },
                     reconnect_mode: false,
+                    cancelable: true,
                 });
                 self.screen = Screen::Wizard;
                 self.needs_clear = true;
@@ -1062,6 +1185,12 @@ impl App {
                 if let Ok(qr) = crate::qr::render_qr_code(&url) {
                     self.qr_string = Some(qr);
                 }
+                // Auto-open QR popup after wizard completion so the user can
+                // pair their mobile client immediately.
+                if self.show_qr_on_ready {
+                    self.show_qr_on_ready = false;
+                    self.popup = Some(PopupKind::QrCode);
+                }
             }
             BridgeEvent::AgentSpawned { command } => {
                 self.log_push(format!("Agent spawned: {}", command));
@@ -1080,6 +1209,12 @@ impl App {
             BridgeEvent::BridgeStopped => {
                 self.transport_up = false;
                 self.log_push("Bridge stopped.".to_string());
+                // If finish_wizard() asked us to restart after the old bridge
+                // fully releases its lock, do it now.
+                if self.restart_pending && self.wizard.is_none() {
+                    self.restart_pending = false;
+                    self.start_bridge();
+                }
             }
             BridgeEvent::BridgeError { message } => {
                 self.log_push(format!("Bridge error: {}", message));
