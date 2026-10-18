@@ -5,12 +5,9 @@
 [![npm](https://img.shields.io/npm/v/%40aptove%2Fbridge?logo=npm&label=npm)](https://www.npmjs.com/package/@aptove/bridge)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/gD7AMxBy9y)
 
-A bridge library and application between Agent Client Protocol (ACP) agents and clients.
+Aptove Bridge is a stand-alone app to connect any AI Agents that support Agent Client Protocol (ACP) with the Aptove Mobile App to seamlessly manage the AI agents running in a server or computer.
 
-`aptove-bridge` can be used in two ways:
-
-- **Standalone binary** — run `bridge` as a separate process that spawns your ACP agent over stdio and exposes it over WebSocket to mobile or desktop clients.
-- **Embedded library** — add `aptove-bridge` as a Rust dependency and run the bridge server in-process alongside your agent, with no subprocess or stdio pipe required.
+Bridge is actively developed and we are still experimenting. Until the first stable version, expect breaking changes in the configuration files and how it works.
 
 ## Transport Modes
 
@@ -20,8 +17,6 @@ A bridge library and application between Agent Client Protocol (ACP) agents and 
 | **Cloudflare** | Remote access via Cloudflare Zero Trust (internet-accessible) | [docs/transport/cloudflare.md](docs/transport/cloudflare.md) |
 | **Tailscale** | Private overlay network via MagicDNS + HTTPS (Recommended) | [docs/transport/tailscale.md](docs/transport/tailscale.md) |
 
-One transport is active at a time. When multiple are enabled in `common.toml`, the bridge prompts you to select one at startup.
-
 ## Features
 
 - 📱 **QR Code Pairing**: Secure one-time code pairing via QR scan
@@ -30,66 +25,10 @@ One transport is active at a time. When multiple are enabled in `common.toml`, t
 - 🌐 **Multi-Transport**: Local, Cloudflare, Tailscale — configure and switch between them
 - 🔑 **Stable Agent Identity**: `agent_id` UUID persisted in `common.toml` for multi-transport dedup on mobile
 - 🔔 **Push Notifications**: Wake the mobile app when the agent responds while backgrounded
+- 🖥️ **Terminal UI**: Interactive TUI for setup and day-to-day management
 - 🦀 **Embeddable**: Use as a library with `StdioBridge` for in-process deployment
 
 ---
-
-## Using as a Library
-
-Add to your `Cargo.toml`:
-
-```toml
-[dependencies]
-aptove-bridge = "0.2"
-```
-
-### Minimal Example
-
-```rust
-use aptove_bridge::{
-    bridge::StdioBridge,
-    common_config::CommonConfig,
-    tls::TlsConfig,
-};
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Load (or initialise) shared config — generates agent_id and auth_token on first run
-    let mut config = CommonConfig::load()?;
-    config.ensure_agent_id();
-    config.ensure_auth_token();
-    config.save()?;
-
-    // Generate (or load) a self-signed TLS cert
-    let tls = TlsConfig::load_or_generate(&CommonConfig::config_dir(), &[])?;
-
-    StdioBridge::new("copilot --acp".to_string(), 8765)
-        .with_auth_token(Some(config.auth_token.clone()))
-        .with_tls(tls)
-        .start()
-        .await
-}
-```
-
-### `StdioBridge` Builder Methods
-
-| Method | Description |
-|--------|-------------|
-| `new(agent_command, port)` | Create a bridge that spawns the given command; listen on `port` |
-| `.with_bind_addr(addr)` | Override bind address (default: `"0.0.0.0"`) |
-| `.with_auth_token(token)` | Require a bearer token for connections |
-| `.with_tls(tls_config)` | Enable TLS with a `TlsConfig` (self-signed cert) |
-| `.with_external_tls()` | Signal that TLS is handled upstream (Tailscale Serve, Cloudflare) |
-| `.with_pairing(manager)` | Enable QR pairing via a `PairingManager` |
-| `.with_agent_pool(pool)` | Enable keep-alive sessions via an `AgentPool` |
-| `.with_working_dir(dir)` | Set the working directory for the spawned agent process |
-| `.with_push_relay(client)` | Enable push notifications via a relay |
-| `.with_webhook_resolver(fn)` | Handle `POST /webhook/<token>` trigger requests |
-| `.start()` | Start the WebSocket listener (runs until shutdown) |
-
----
-
-## Standalone Binary
 
 ### Quick Start
 
@@ -97,31 +36,26 @@ async fn main() -> anyhow::Result<()> {
 # Build
 cargo build --release
 
-# Start the bridge — interactive agent selection menu
+# Start the bridge — opens the interactive TUI (setup wizard on first run)
 ./target/release/bridge
 
-# Or specify the agent directly
-./target/release/bridge run --agent-command "copilot --acp"
+# Use a custom config directory
+./target/release/bridge -c ./my-config
 ```
 
-Running `bridge` with no subcommand defaults to `run`. When `--agent-command` is omitted, an interactive menu lets you pick from known agents (Copilot, Gemini, Goose) or enter a custom command.
+On first launch the setup wizard runs automatically: it asks you to choose an agent command and a transport, then starts the bridge and shows a QR code for pairing.
 
 Scan the QR code with the mobile app to connect.
 
 ### Configuration — `common.toml`
 
-All transport settings live in `common.toml`. The file is created automatically with local transport enabled on first run.
+All settings live in `common.toml`, created automatically by the setup wizard on first run.
 
-**Default location:**
-
-| Platform | Path |
-|----------|------|
-| macOS | `~/Library/Application Support/com.aptove.bridge/common.toml` |
-| Linux | `~/.config/bridge/common.toml` |
+**Default location:** `.aptove-bridge/` directory inside the working directory where the bridge is launched.
 
 Override with `-c` / `--config-dir`:
 ```bash
-bridge -c ./my-config run --agent-command "copilot --acp"
+bridge -c ./my-config
 ```
 
 #### Example `common.toml`
@@ -129,6 +63,10 @@ bridge -c ./my-config run --agent-command "copilot --acp"
 ```toml
 agent_id   = "550e8400-e29b-41d4-a716-446655440000"  # auto-generated UUID
 auth_token = "base64urltoken"                         # auto-generated
+agent_command = "copilot --acp"                       # set by setup wizard
+
+keep_alive = true    # prevent system sleep while bridge is running
+log_level  = "WARN"  # ERROR / WARN / INFO / DEBUG / TRACE
 
 [transports.local]
 enabled = true
@@ -136,7 +74,7 @@ port    = 8765
 tls     = true
 
 [transports.cloudflare]
-enabled       = true
+enabled       = false
 hostname      = "https://agent.example.com"
 tunnel_id     = "abc123"
 tunnel_secret = "..."
@@ -145,7 +83,7 @@ client_id     = "client.access"
 client_secret = "xxxxx"
 
 [transports.tailscale-serve]
-enabled = true
+enabled = false
 
 # Optional — enables push notifications (see Push Notifications section below)
 [push_relay]
@@ -155,7 +93,9 @@ client_id     = "your-client-id"
 client_secret = "your-client-secret"
 ```
 
-Enable only the transports you need. `agent_id` and `auth_token` are generated automatically on first run and stay stable across restarts.
+No transports are pre-enabled. The setup wizard asks you to choose one on first run.
+
+`agent_id` and `auth_token` are generated automatically on first run and stay stable across restarts.
 
 #### Config Directory Files
 
@@ -163,35 +103,30 @@ All bridge state lives in the config directory. These files are created automati
 
 | File | Purpose |
 |------|---------|
-| `common.toml` | Main config — `agent_id`, `auth_token`, and transport settings. Permissions `0600`. |
+| `common.toml` | Main config — `agent_id`, `auth_token`, `agent_command`, and transport settings. Permissions `0600`. |
 | `cert.pem` | Self-signed TLS certificate for the local transport WebSocket server. Its fingerprint is embedded in the QR pairing payload for certificate pinning. |
 | `key.pem` | Private key for the TLS certificate. |
-| `cert-extra-sans.json` | Tracks extra Subject Alternative Names (IPs/hostnames) baked into the TLS cert (e.g. `--advertise-addr` or Tailscale IP). When these change, the cert is automatically regenerated. |
+| `cert-extra-sans.json` | Tracks extra Subject Alternative Names (IPs/hostnames) baked into the TLS cert. When these change, the cert is automatically regenerated. |
 
-### Commands
+### CLI
 
-#### `run` — Start the bridge (default)
-
-`run` is the default subcommand — running `bridge` with no arguments is equivalent to `bridge run`.
-
-```bash
-# Interactive agent selection
-bridge
-
-# Or specify the agent directly
-bridge run --agent-command "copilot --acp"
+```
+bridge [OPTIONS] [COMMAND]
 ```
 
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--agent-command <CMD>` | `-a` | Command to spawn the ACP agent | Interactive menu |
-| `--bind <ADDR>` | `-b` | Address to bind the listener | `0.0.0.0` |
-| `--verbose` | | Enable info-level logging | Off (warn only) |
-| `--advertise-addr <ADDR>` | | Override LAN address in QR pairing URL | Auto-detected |
-| `--push-client-id <ID>` | | Push service client ID (skips interactive prompt) | Interactive |
-| `--push-client-secret <SECRET>` | | Push service client secret (skips interactive prompt) | Interactive |
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--config-dir <PATH>` | `-c` | Use a custom config directory instead of `.aptove-bridge/` |
+| `--version` | `-v` | Print version |
 
-When `--agent-command` is omitted, the bridge presents an interactive menu:
+| Subcommand | Description |
+|------------|-------------|
+| *(none)* | Start the TUI (setup wizard if needed, then running screen) |
+| `setup` | Re-run the Cloudflare Zero Trust setup wizard |
+
+#### `bridge` (default — TUI)
+
+Running `bridge` with no arguments opens the interactive TUI. On first launch it runs the setup wizard:
 
 ```
 Select an agent to run:
@@ -202,45 +137,41 @@ Select an agent to run:
 Enter number [1]:
 ```
 
-The QR code for pairing is always displayed at startup.
+Select **Custom** to enter any ACP-compatible agent command, for example:
 
-Transport selection, port, TLS, and auth token are all read from `common.toml`.
-
-#### `show-qr` — Show QR code for a second device
-
-```bash
-bridge show-qr
+```
+npx @agentclientprotocol/claude-agent-acp
 ```
 
-Displays the connection QR code for the currently active transport. The bridge must already be running. Use this to pair an additional device without restarting.
+After the wizard completes the bridge starts and displays a QR code for pairing.
 
-#### `setup` — Provision Cloudflare infrastructure
+#### `bridge setup`
 
-```bash
-bridge setup \
-  --api-token  "your-api-token" \
-  --account-id "your-account-id" \
-  --domain     "example.com" \
-  --subdomain  "agent"
-```
-
-Creates the Cloudflare tunnel, DNS record, Access Application, and Service Token. Saves credentials to `common.toml` under `[transports.cloudflare]`. Only needed once.
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--api-token <TOKEN>` | Cloudflare API token | Required |
-| `--account-id <ID>` | Cloudflare account ID | Required |
-| `--domain <DOMAIN>` | Domain managed by Cloudflare | Required |
-| `--subdomain <SUB>` | Subdomain for the bridge endpoint | `agent` |
-| `--tunnel-name <NAME>` | Name for the Cloudflare tunnel | `aptove-tunnel` |
-
-#### `status` — Check configuration
+Re-runs the Cloudflare Zero Trust setup wizard as a TUI flow. Use this to reconfigure your Cloudflare tunnel credentials without restarting the running bridge.
 
 ```bash
-bridge status
+bridge setup
 ```
 
-Prints the active `common.toml` path, `agent_id`, enabled transports, and Tailscale availability.
+No flags are needed — the wizard guides you through everything interactively.
+
+### TUI slash commands
+
+Type these in the input bar while the bridge is running:
+
+| Command | Description |
+|---------|-------------|
+| `/qr` | Show QR pairing code |
+| `/agent` | Change the AI agent command |
+| `/push` | Configure push notifications |
+| `/test-push` | Send a test push notification |
+| `/reconnect` | Restart the transport |
+| `/keep-alive` | Toggle prevent-sleep (on by default) |
+| `/log-level` | Change log verbosity (default: WARN) |
+| `/clear-logs` | Clear the log view |
+| `/copy-logs` | Copy all logs to clipboard |
+| `/help` | List all commands |
+| `/quit` | Exit the bridge |
 
 ---
 
@@ -284,25 +215,7 @@ A 30-second per-client debounce prevents notification storms when the agent is v
 
 ### Setup
 
-On `bridge run`, after transport selection, the bridge prompts for push credentials if not yet configured:
-
-```
-Enable push notifications? [y/N]: y
-  Token service URL [https://token.aptove.com]:
-  Push service URL [https://push.aptove.com]:
-  Client ID: your-client-id
-  Client secret: xxxxxxxxxxxxxxxx
-```
-
-Saved to the `[push_relay]` section of `common.toml`. To skip prompts, pass credentials as flags:
-
-```bash
-bridge run --push-client-id your-client-id --push-client-secret xxxxxxxx
-```
-
-URL prompts still appear (with defaults) even when flags are provided.
-
-### `[push_relay]` config
+Configure push via the `/push` TUI command or add the `[push_relay]` section directly to `common.toml`:
 
 ```toml
 [push_relay]
@@ -312,7 +225,7 @@ client_id     = "your-client-id"            # M2M client ID (JWT sub)
 client_secret = "your-client-secret"        # M2M client secret
 ```
 
-All four fields are required. If the section is absent or any field is empty, push is silently disabled. Push relay URL is included in the QR pairing payload so the mobile app knows where to register its device token.
+All four fields are required. If the section is absent or any field is empty, push is silently disabled. The push relay URL is included in the QR pairing payload so the mobile app knows where to register its device token.
 
 ### Security
 
@@ -341,8 +254,6 @@ let bridge = StdioBridge::new("copilot --acp".into(), 8765)
 
 ## Architecture
 
-### Standalone
-
 ```
 ┌─────────────┐                    ┌───────────────────────┐        ┌──────────────┐
 │  Client App │◄──────────────────►│  bridge binary        │◄──────►│  ACP Agent   │
@@ -350,16 +261,7 @@ let bridge = StdioBridge::new("copilot --acp".into(), 8765)
 └─────────────┘                    └───────────────────────┘        └──────────────┘
 ```
 
-### Embedded (library)
-
-```
-┌─────────────┐                    ┌──────────────────────────────────┐        ┌──────────────┐
-│  Client App │◄──────────────────►│  Your process                    │◄──────►│  ACP Agent   │
-│ (iOS/Android│  WebSocket (TLS)   │  StdioBridge (transport listener)│  stdio │  (your cmd)  │
-└─────────────┘                    └──────────────────────────────────┘        └──────────────┘
-```
-
-The agent process is still spawned as a subprocess via stdio — `StdioBridge` handles the WebSocket server, TLS, auth, and pairing in-process alongside your application.
+The agent process is spawned as a subprocess via stdio — `StdioBridge` handles the WebSocket server, TLS, auth, and pairing in-process alongside your application.
 
 ---
 
@@ -371,16 +273,16 @@ The agent process is still spawned as a subprocess via stdio — `StdioBridge` h
 | "Unauthorized" on connect | Wrong or missing auth token | Re-scan QR code |
 | TLS handshake failure | Certificate mismatch | Delete the config dir and restart to regenerate certs; re-pair the device |
 | App cannot reach bridge | Firewall blocking the port | Check OS firewall; ensure the port in `common.toml` is open |
-| Transport fails to start | `common.toml` has no `enabled = true` transport | Run `bridge status` to see configured transports |
+| Transport fails to start | No transport has `enabled = true` | Run the bridge and check the setup wizard |
 
 ### Debugging
 
 ```bash
-# Enable verbose logging
-bridge run --verbose
+# Change log verbosity via TUI
+# Type /log-level and select DEBUG or TRACE
 
-# Check which transports are configured
-bridge status
+# Or set it permanently in common.toml
+log_level = "DEBUG"
 
 # Test agent command independently
 echo '{"jsonrpc":"2.0","method":"initialize","id":1}' | copilot --acp
@@ -390,12 +292,7 @@ echo '{"jsonrpc":"2.0","method":"initialize","id":1}' | copilot --acp
 
 Please note that the project is extensively tested only with Copilot CLI. Open a bug report if you notice any issues with other ACP-Compatible Agents.
 
-The easiest way to test any supported agent is to run `bridge` and pick it from the interactive menu. Alternatively, pass the command directly:
-
-```bash
-bridge run -a "gemini --experimental-acp" --verbose
-bridge run -a "goose acp" --verbose
-```
+Run `bridge` and pick an agent from the setup wizard, or edit `agent_command` directly in `common.toml`.
 
 ---
 
@@ -405,16 +302,12 @@ bridge run -a "goose acp" --verbose
 - **TLS**: self-signed certificate generated on first run. Certificate fingerprint is included in the QR pairing payload and pinned by the mobile app to prevent MITM attacks.
 - **Pairing codes**: 6-digit, single-use, expire after 60 seconds. Rate-limited to 5 attempts per code.
 - **`common.toml`**: contains all secrets. Permissions are set to `0600` automatically. Keep it secure.
-- **Agent command**: the `--agent-command` value (or interactive menu selection) is validated at startup — the binary must exist and be executable before the server accepts connections. The command is never persisted to `common.toml`; it must be supplied each time the bridge is started. The bridge is an operator tool: whoever can invoke it already has local shell access, so the agent command is implicitly trusted to the same degree as any other command that user could run.
+- **Agent command**: saved to `agent_command` in `common.toml` by the setup wizard. It can be changed at any time via the `/agent` TUI command. The bridge is an operator tool: whoever can invoke it already has local shell access, so the agent command is implicitly trusted to the same degree as any other command that user could run.
 
 To rotate credentials (invalidates all paired devices):
 
 ```bash
-# macOS
-rm ~/Library/Application\ Support/com.aptove.bridge/common.toml
-# Linux
-rm ~/.config/bridge/common.toml
-
+rm .aptove-bridge/common.toml
 bridge
 ```
 
@@ -429,4 +322,4 @@ cargo test               # Run tests
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE)
+MIT — see [LICENSE](LICENSE)
