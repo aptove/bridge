@@ -1723,8 +1723,8 @@ where
 
         let method = request.get("method").and_then(|m| m.as_str());
 
-        // Accept both session/new (new session) and session/load (resume session)
-        if method == Some("session/new") || method == Some("session/load") {
+        // Accept session/new (new session), session/load (V1 resume), session/resume (V2 resume)
+        if method == Some("session/new") || method == Some("session/load") || method == Some("session/resume") {
             break; // found it
         }
 
@@ -1778,7 +1778,8 @@ where
         return (false, false);
     }
 
-    let was_new = request.get("method").and_then(|m| m.as_str()) == Some("session/new");
+    let method_str = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let was_new = method_str == "session/new";
 
     // Extract the request ID so we can match it in the response
     let request_id = match request.get("id") {
@@ -1786,8 +1787,7 @@ where
         None => return (false, false),
     };
 
-    let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("unknown");
-    info!("🔄 Intercepting {} request (id={})", method, request_id);
+    info!("🔄 Intercepting {} request (id={})", method_str, request_id);
 
     // Parse the cached response and replace its "id" with the new request's "id"
     let mut cached: serde_json::Value = match serde_json::from_str(cached_response) {
