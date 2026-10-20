@@ -1,0 +1,1265 @@
+use std::sync::{Arc, atomic::{AtomicU8, Ordering}};
+
+use anyhow::Result;
+use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyModifiers},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::Rect,
+    style::{Color, Style},
+    widgets::{Block, Clear},
+    Terminal,
+};
+use std::io;
+use tokio::sync::mpsc;
+use tracing::info;
+
+use crate::common_config::{CommonConfig, PushRelayConfig, TransportConfig};
+use crate::transport;
+use crate::tui::{
+    events::{AppEvent, BridgeEvent},
+    screens::{
+        popup::{render_popup, url_at, PopupKind, LOG_LEVELS, PushPopupStep},
+        running::{render_running, RunningState},
+        wizard::{
+            compute_transport_statuses, render_wizard, wizard_backspace, wizard_confirm_agent,
+            wizard_move_down, wizard_move_up, wizard_next_field, wizard_type_char, WizardState,
+            WizardStep,
+        },
+    },
+    widgets::input_bar::{AcEntry, AutocompleteState},
+};
+use crate::runner::run_bridge;
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// All slash commands with their one-line descriptions.
+const COMMANDS: &[(&str, &str)] = &[
+    ("/qr",          "Show QR pairing code"),
+    ("/test-push",   "Send a test push notification"),
+    ("/push",        "Configure push notifications"),
+    ("/reconnect",   "Restart the transport"),
+    ("/keep-alive",  "Toggle prevent-sleep (on by default)"),
+    ("/log-level",   "Change log verbosity (default: WARN)"),
+    ("/clear-logs",  "Clear the log view"),
+    ("/copy-logs",   "Copy all logs to clipboard"),
+    ("/agent",       "Change the AI agent"),
+    ("/help",        "List commands"),
+    ("/quit",        "Exit the bridge"),
+];
+
+#[derive(Debug, PartialEq)]
+enum Screen {
+    Wizard,
+    Running,
+}
+
+pub struct App {
+    screen: Screen,
+    wizard: Option<WizardState>,
+    popup: Option<PopupKind>,
+
+    // Config (mutable during wizard).
+    config: CommonConfig,
+
+    // Running state.
+    transport_name: String,
+    transport_addr: String,
+    transport_up: bool,
+    push_up: bool,
+    pairing_url: Option<String>,
+    qr_string: Option<String>,    // rendered QR (recomputed when pairing_url changes)
+    tls_fingerprint: Option<String>,
+
+    // Logs.
+    logs: Vec<crate::tui::events::LogRecord>,
+    log_scroll: usize,    // 0 = tail; larger = scrolled up
+    auto_scroll: bool,
+
+    // Input bar.
+    input: String,
+    // Autocomplete: indices into COMMANDS that match the current input prefix.
+    ac_matches: Vec<usize>,
+    ac_idx: usize,
+
+    // Transport selected for this session (set by wizard or auto-detected).
+    selected_transport: Option<String>,
+
+    // Bridge shutdown signal.
+    bridge_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+
+    // Event channel sender (for spawning background tasks).
+    event_tx: mpsc::Sender<AppEvent>,
+
+    // Whether quit was requested.
+    quit: bool,
+
+    // Keep-alive guard — held while keep_alive is enabled; dropped to release.
+    keepalive: Option<keepawake::KeepAwake>,
+
+    // Shared with TuiLogLayer — written here, read in on_event().
+    log_level_arc: Arc<AtomicU8>,
+
+    // Terminal size — updated each frame; used for popup URL hit-testing.
+    term_area: Rect,
+
+    // When true, call terminal.clear() before the next draw to flush
+    // artifacts left by dismissed wizards or popups.
+    needs_clear: bool,
+
+    // Countdown ticks for the "Copied!" indicator in the log panel (200ms per tick).
+    copy_hint_ticks: u8,
+
+    // When true, start_bridge() is called as soon as BridgeStopped is received.
+    // Used to avoid a lock-file race when restarting: the old bridge must fully
+    // release the lock before the new one starts.
+    restart_pending: bool,
+
+    // When true, open the QR popup as soon as the pairing URL is ready.
+    // Set after any wizard completion so the user can pair immediately.
+    show_qr_on_ready: bool,
+}
+
+impl App {
+    pub fn new(config: CommonConfig, event_tx: mpsc::Sender<AppEvent>, log_level_arc: Arc<AtomicU8>) -> Self {
+        let wizard = WizardState::compute(&config);
+        let screen = if wizard.is_some() { Screen::Wizard } else { Screen::Running };
+
+        // When no wizard is needed there's exactly one enabled transport — pre-select it.
+        let selected_transport = if wizard.is_none() {
+            config.enabled_transports().first().map(|(n, _)| n.to_string())
+        } else {
+            None
+        };
+
+        let keepalive = if config.keep_alive {
+            keepawake::Builder::default()
+                .display(false)
+                .idle(true)
+                .sleep(true)
+                .create()
+                .ok()
+        } else {
+            None
+        };
+
+        // If no wizard is needed but push isn't configured, auto-open the push menu.
+        let popup = if wizard.is_none() && config.push_relay.is_none() {
+            Some(PopupKind::PushConfig {
+                step: PushPopupStep::Menu { selected: 0, active: 0 },
+            })
+        } else {
+            None
+        };
+
+        Self {
+            screen,
+            wizard,
+            popup,
+            config,
+            transport_name: String::new(),
+            transport_addr: String::new(),
+            transport_up: false,
+            push_up: false,
+            pairing_url: None,
+            qr_string: None,
+            tls_fingerprint: None,
+            logs: Vec::new(),
+            log_scroll: 0,
+            auto_scroll: true,
+            input: String::new(),
+            ac_matches: Vec::new(),
+            ac_idx: 0,
+            selected_transport,
+            bridge_shutdown: None,
+            event_tx,
+            quit: false,
+            keepalive,
+            log_level_arc,
+            term_area: Rect::default(),
+            needs_clear: false,
+            copy_hint_ticks: 0,
+            restart_pending: false,
+            show_qr_on_ready: false,
+        }
+    }
+
+    /// Start the ratatui terminal, keyboard thread, and run the event loop.
+    pub async fn run(mut self, mut event_rx: mpsc::Receiver<AppEvent>) -> Result<()> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+
+        // Clear any previous terminal content so it doesn't bleed through.
+        terminal.clear()?;
+
+        // If no wizard needed, start bridge immediately.
+        if self.screen == Screen::Running {
+            self.start_bridge();
+        }
+
+        // Main event loop.
+        loop {
+            if let Ok(size) = terminal.size() {
+                self.term_area = Rect { x: 0, y: 0, width: size.width, height: size.height };
+            }
+            if self.needs_clear {
+                self.needs_clear = false;
+                terminal.clear()?;
+            }
+            terminal.draw(|frame| {
+                match self.screen {
+                    Screen::Wizard => {
+                        // Full-screen dark background so no running-screen content bleeds through.
+                        // Clear first (resets cell symbols), then paint background black.
+                        frame.render_widget(Clear, frame.area());
+                        frame.render_widget(
+                            Block::default().style(Style::default().bg(Color::Black)),
+                            frame.area(),
+                        );
+                        if let Some(ref wizard) = self.wizard {
+                            render_wizard(frame, wizard);
+                        }
+                    }
+                    Screen::Running => {
+                        let running_state = RunningState {
+                            transport_name: self.transport_name.clone(),
+                            transport_addr: self.transport_addr.clone(),
+                            transport_up: self.transport_up,
+                            push_up: self.push_up,
+                            keep_alive: self.config.keep_alive,
+                            copy_hint: if self.copy_hint_ticks > 0 { Some(" Copied!") } else { None },
+                        };
+                        // Build autocomplete entries for the renderer (no allocation if empty).
+                        let ac_entries: Vec<AcEntry<'_>> = self.ac_matches.iter().map(|&i| AcEntry {
+                            command: COMMANDS[i].0,
+                            description: COMMANDS[i].1,
+                        }).collect();
+                        let ac_state = if ac_entries.is_empty() {
+                            None
+                        } else {
+                            Some(AutocompleteState { matches: &ac_entries, selected: self.ac_idx })
+                        };
+                        render_running(frame, &running_state, &self.logs, self.log_scroll, &self.input, VERSION, ac_state.as_ref());
+                        if let Some(ref popup) = self.popup {
+                            // Dark overlay so log content doesn't show through the popup area.
+                            // Clear first (resets cell symbols), then paint background black.
+                            frame.render_widget(Clear, frame.area());
+                            frame.render_widget(
+                                Block::default().style(Style::default().bg(Color::Black)),
+                                frame.area(),
+                            );
+                            render_popup(frame, popup, &self.qr_string);
+                        }
+                    }
+                }
+            })?;
+
+            if self.quit {
+                break;
+            }
+
+            match event_rx.recv().await {
+                Some(event) => self.handle_event(event).await,
+                None => break,
+            }
+        }
+
+        // Cleanup terminal.
+        disable_raw_mode()?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+        terminal.show_cursor()?;
+
+        // Signal bridge shutdown.
+        if let Some(tx) = self.bridge_shutdown.take() {
+            let _ = tx.send(());
+        }
+
+        Ok(())
+    }
+
+    async fn handle_event(&mut self, event: AppEvent) {
+        match event {
+            AppEvent::Key(key) => self.handle_key(key).await,
+            AppEvent::Bridge(ev) => self.handle_bridge_event(ev),
+            AppEvent::Log(record) => {
+                self.logs.push(record);
+                if self.logs.len() > 10_000 {
+                    self.logs.drain(0..1_000);
+                }
+                if self.auto_scroll {
+                    self.log_scroll = 0;
+                }
+            }
+            AppEvent::Mouse(mouse) => self.handle_mouse(mouse),
+            AppEvent::Tick => {
+                if self.copy_hint_ticks > 0 {
+                    self.copy_hint_ticks -= 1;
+                }
+            }
+            AppEvent::Resize(w, h) => {
+                self.term_area = Rect { x: 0, y: 0, width: w, height: h };
+            }
+            AppEvent::PluginSetupResult { transport_name, result } => {
+                self.handle_plugin_setup_result(transport_name, result).await;
+            }
+            AppEvent::TestPushResult(result) => {
+                match result {
+                    Ok(true)  => self.log_push("Push notification sent successfully.".to_string()),
+                    Ok(false) => self.log_push("No registered devices / debounce active.".to_string()),
+                    Err(e)    => self.log_push(format!("Push notification failed: {}", e)),
+                }
+            }
+        }
+    }
+
+    async fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
+        // Ctrl+C always quits.
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
+            self.quit = true;
+            return;
+        }
+
+        match self.screen {
+            Screen::Wizard => self.handle_wizard_key(key).await,
+            Screen::Running => self.handle_running_key(key).await,
+        }
+    }
+
+    async fn handle_wizard_key(&mut self, key: crossterm::event::KeyEvent) {
+        let Some(ref mut wizard) = self.wizard else { return };
+
+        match key.code {
+            KeyCode::Esc => self.handle_wizard_escape().await,
+            KeyCode::Up => wizard_move_up(wizard),
+            KeyCode::Down => wizard_move_down(wizard),
+            KeyCode::Tab => wizard_next_field(wizard),
+            KeyCode::Backspace => wizard_backspace(wizard),
+            KeyCode::Char(c) => wizard_type_char(wizard, c),
+            KeyCode::Enter => self.handle_wizard_enter().await,
+            _ => {}
+        }
+    }
+
+    async fn handle_wizard_escape(&mut self) {
+        let Some(ref wizard) = self.wizard else { return };
+        let cancelable = wizard.cancelable;
+        match &wizard.step {
+            WizardStep::AgentCustomInput { .. } => {
+                // Back to agent select.
+                if let Some(ref mut w) = self.wizard {
+                    w.step = WizardStep::AgentSelect { selected: AGENTS.len() - 1 };
+                }
+            }
+            WizardStep::PluginSetup { .. } => {
+                // Back to transport picker.
+                let ts_available = crate::tailscale::is_tailscale_available();
+                let ts_installed = crate::tailscale::is_tailscale_installed();
+                let statuses = compute_transport_statuses(&self.config, self.selected_transport.as_deref(), ts_available, ts_installed);
+                if let Some(ref mut w) = self.wizard {
+                    w.step = WizardStep::TransportPick { selected: 0, ts_available, ts_installed, statuses };
+                }
+            }
+            WizardStep::PushSetup { .. } => {
+                // Skip push setup.
+                self.advance_past_push();
+            }
+            _ if cancelable => {
+                // Cancel wizard and return to running screen.
+                self.wizard = None;
+                self.screen = Screen::Running;
+                self.needs_clear = true;
+            }
+            _ => {}
+        }
+    }
+
+    async fn handle_wizard_enter(&mut self) {
+        let step = self.wizard.as_ref().map(|w| w.step.clone());
+        match step {
+            Some(WizardStep::AgentSelect { selected }) => {
+                let result = self.wizard.as_ref().and_then(|w| {
+                    // Returns None if Custom chosen, Some(cmd) otherwise.
+                    match wizard_confirm_agent(w) {
+                        Some(maybe_cmd) => maybe_cmd.map(|cmd| (cmd, false)),
+                        None => None,
+                    }
+                });
+
+                if let Some((cmd, _)) = result {
+                    self.config.agent_command = Some(cmd);
+                    let _ = self.config.save();
+                    self.advance_wizard_after_agent().await;
+                } else if selected == AGENTS.len() - 1 {
+                    // Custom selected.
+                    if let Some(ref mut w) = self.wizard {
+                        w.step = WizardStep::AgentCustomInput { input: String::new() };
+                    }
+                }
+            }
+
+            Some(WizardStep::AgentCustomInput { ref input }) => {
+                if !input.is_empty() {
+                    let cmd = input.clone();
+                    self.config.agent_command = Some(cmd);
+                    let _ = self.config.save();
+                    self.advance_wizard_after_agent().await;
+                }
+            }
+
+            Some(WizardStep::TransportPick { selected, ts_available, .. }) => {
+                let idx = selected;
+                let plugins = transport::all();
+                if let Some(plugin) = plugins.get(idx) {
+                    let name = plugin.name().to_string();
+                    self.handle_transport_pick(&name, ts_available).await;
+                }
+            }
+
+            Some(WizardStep::PluginSetup { ref transport_name, ref fields, field_idx, .. }) => {
+                let plugin = transport::get(transport_name.as_str());
+                let n_fields = plugin.and_then(|p| p.wizard_fields()).map(|f| f.len()).unwrap_or(1);
+                if field_idx < n_fields - 1 {
+                    if let Some(ref mut w) = self.wizard {
+                        if let WizardStep::PluginSetup { ref mut field_idx, .. } = w.step {
+                            *field_idx += 1;
+                        }
+                    }
+                } else {
+                    // Validate non-empty fields.
+                    let field_values = fields.clone();
+                    let has_empty = field_values.iter().any(|f| f.is_empty());
+                    if has_empty {
+                        if let Some(ref mut w) = self.wizard {
+                            if let WizardStep::PluginSetup { ref mut error, .. } = w.step {
+                                *error = Some("All fields are required.".to_string());
+                            }
+                        }
+                        return;
+                    }
+
+                    let t_name = transport_name.clone();
+                    if let Some(ref mut w) = self.wizard {
+                        w.step = WizardStep::PluginLoading { transport_name: t_name.clone() };
+                    }
+
+                    let event_tx = self.event_tx.clone();
+                    if let Some(plugin) = transport::get(t_name.as_str()) {
+                        tokio::spawn(async move {
+                            let result = plugin.run_setup(field_values).await;
+                            let _ = event_tx.send(AppEvent::PluginSetupResult {
+                                transport_name: t_name,
+                                result,
+                            }).await;
+                        });
+                    }
+                }
+            }
+
+            Some(WizardStep::PushSetup { ref fields, field_idx, .. }) => {
+                if field_idx < 3 {
+                    if let Some(ref mut w) = self.wizard {
+                        if let WizardStep::PushSetup { ref mut field_idx, .. } = w.step {
+                            *field_idx += 1;
+                        }
+                    }
+                } else {
+                    // Submit push config.
+                    let token_url     = fields[0].clone();
+                    let push_url      = fields[1].clone();
+                    let client_id     = fields[2].clone();
+                    let client_secret = fields[3].clone();
+
+                    if client_id.is_empty() || client_secret.is_empty() {
+                        if let Some(ref mut w) = self.wizard {
+                            if let WizardStep::PushSetup { ref mut error, .. } = w.step {
+                                *error = Some("Client ID and secret are required.".to_string());
+                            }
+                        }
+                        return;
+                    }
+
+                    self.config.push_relay = Some(PushRelayConfig {
+                        url: push_url,
+                        token_url,
+                        client_id,
+                        client_secret,
+                    });
+                    let _ = self.config.save();
+                    self.advance_past_push();
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    async fn advance_wizard_after_agent(&mut self) {
+        let enabled_count = self.config.enabled_transports().len();
+        if enabled_count == 1 {
+            // Exactly one transport configured — use it automatically.
+            let name = self.config.enabled_transports()[0].0.to_string();
+            self.selected_transport = Some(name);
+            self.advance_wizard_after_transport().await;
+        } else {
+            // 0 or 2+ transports: user must pick.
+            self.show_transport_pick();
+        }
+    }
+
+    fn show_transport_pick(&mut self) {
+        let ts_available = crate::tailscale::is_tailscale_available();
+        let ts_installed = crate::tailscale::is_tailscale_installed();
+        let active = if self.transport_name.is_empty() { None } else { Some(self.transport_name.as_str()) };
+        let statuses = compute_transport_statuses(&self.config, active, ts_available, ts_installed);
+        if let Some(ref mut w) = self.wizard {
+            w.step = WizardStep::TransportPick { selected: 0, ts_available, ts_installed, statuses };
+        }
+    }
+
+    /// Handle the user confirming a transport in the `TransportPick` step.
+    async fn handle_transport_pick(&mut self, name: &str, ts_available: bool) {
+        let plugin = transport::get(name);
+        let already_ready = plugin
+            .map(|p| p.is_configured(&self.config))
+            .unwrap_or(false);
+
+        if already_ready {
+            self.selected_transport = Some(name.to_string());
+            self.advance_after_transport_pick().await;
+            return;
+        }
+
+        // Transport needs setup.
+        match name {
+            "local" => {
+                let tc = TransportConfig { enabled: true, port: Some(8765), tls: Some(true), ..Default::default() };
+                self.config.transports.insert("local".to_string(), tc);
+                let _ = self.config.save();
+                self.selected_transport = Some("local".to_string());
+                self.advance_after_transport_pick().await;
+            }
+            "tailscale-serve" => {
+                if !ts_available {
+                    self.show_transport_pick();
+                    return;
+                }
+                let tc = TransportConfig { enabled: true, port: Some(8766), tls: None, ..Default::default() };
+                self.config.transports.insert("tailscale-serve".to_string(), tc);
+                let _ = self.config.save();
+                self.selected_transport = Some("tailscale-serve".to_string());
+                self.advance_after_transport_pick().await;
+            }
+            other => {
+                // Plugin transport — open the wizard form if it has fields.
+                if let Some(plugin) = transport::get(other) {
+                    if let Some(fields) = plugin.wizard_fields() {
+                        let defaults: Vec<String> = fields.iter().map(|f| f.default_value.to_string()).collect();
+                        if let Some(ref mut w) = self.wizard {
+                            w.step = WizardStep::PluginSetup {
+                                transport_name: other.to_string(),
+                                fields: defaults,
+                                field_idx: 0,
+                                error: None,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Called after a transport has been picked (and set up if needed).
+    ///
+    /// In reconnect mode: skip push setup, go straight to Done.
+    /// In normal mode: continue with push setup check.
+    async fn advance_after_transport_pick(&mut self) {
+        let reconnect = self.wizard.as_ref().map(|w| w.reconnect_mode).unwrap_or(false);
+        if reconnect {
+            self.finish_wizard();
+        } else {
+            self.advance_wizard_after_transport().await;
+        }
+    }
+
+    async fn advance_wizard_after_transport(&mut self) {
+        self.finish_wizard();
+    }
+
+    fn advance_past_push(&mut self) {
+        self.finish_wizard();
+    }
+
+    /// Close the active popup and schedule a full clear before the next draw
+    /// so no artifact cells from the popup linger on screen.
+    fn close_popup(&mut self) {
+        self.popup = None;
+        self.needs_clear = true;
+    }
+
+    fn finish_wizard(&mut self) {
+        self.wizard = None;
+        self.screen = Screen::Running;
+        self.needs_clear = true;
+        // Auto-show QR when the bridge comes up so the user can pair immediately.
+        self.show_qr_on_ready = true;
+
+        if let Some(tx) = self.bridge_shutdown.take() {
+            // Bridge is currently running — stop it and wait for BridgeStopped
+            // before starting the new one (avoids the lock-file race condition).
+            let _ = tx.send(());
+            self.transport_up = false;
+            self.restart_pending = true;
+        } else {
+            // Bridge already stopped (or never ran) — start immediately.
+            self.restart_pending = false;
+            self.start_bridge();
+        }
+
+        // Auto-open push config if not yet set.
+        if self.config.push_relay.is_none() {
+            self.popup = Some(PopupKind::PushConfig {
+                step: PushPopupStep::Menu { selected: 0, active: 0 },
+            });
+        }
+    }
+
+    async fn handle_plugin_setup_result(&mut self, transport_name: String, result: Result<TransportConfig, String>) {
+        match result {
+            Ok(tc) => {
+                self.config.transports.insert(transport_name.clone(), tc);
+                let _ = self.config.save();
+                self.selected_transport = Some(transport_name.clone());
+                self.advance_after_transport_pick().await;
+            }
+            Err(e) => {
+                // Revert to plugin form with error.
+                if let Some(plugin) = transport::get(transport_name.as_str()) {
+                    if let Some(fields) = plugin.wizard_fields() {
+                        let defaults: Vec<String> = fields.iter().map(|f| f.default_value.to_string()).collect();
+                        if let Some(ref mut w) = self.wizard {
+                            w.step = WizardStep::PluginSetup {
+                                transport_name,
+                                fields: defaults,
+                                field_idx: 0,
+                                error: Some(e),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn start_bridge(&mut self) {
+        let transport = match self.selected_transport.clone() {
+            Some(t) => t,
+            None => {
+                // Fallback: use the only enabled transport (should not happen normally).
+                match self.config.enabled_transports().first().map(|(n, _)| n.to_string()) {
+                    Some(t) => t,
+                    None => {
+                        self.log_push("No transport configured — cannot start bridge.".to_string());
+                        return;
+                    }
+                }
+            }
+        };
+        let config = self.config.clone();
+        let event_tx = self.event_tx.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        self.bridge_shutdown = Some(shutdown_tx);
+        self.transport_up = false;
+
+        tokio::spawn(async move {
+            if let Err(e) = run_bridge(config, transport, event_tx.clone(), shutdown_rx).await {
+                let _ = event_tx.send(AppEvent::Bridge(BridgeEvent::BridgeError {
+                    message: e.to_string(),
+                })).await;
+            }
+        });
+    }
+
+    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        // Left-click: check if it lands on a clickable URL in the active popup.
+        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+            if let Some(ref popup) = self.popup {
+                if let Some(url) = url_at(popup, mouse.column, mouse.row, self.term_area) {
+                    open::that(url).ok();
+                }
+            }
+            return;
+        }
+
+        // Remaining handlers only apply when on the Running screen with no popup.
+        if self.screen != Screen::Running || self.popup.is_some() {
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.log_scroll = self.log_scroll.saturating_add(3);
+                self.auto_scroll = false;
+            }
+            MouseEventKind::ScrollDown => {
+                self.log_scroll = self.log_scroll.saturating_sub(3);
+                if self.log_scroll == 0 {
+                    self.auto_scroll = true;
+                }
+            }
+            // Right-click: copy the log line under the cursor to the clipboard.
+            MouseEventKind::Down(MouseButton::Right) => {
+                if let Some(text) = self.log_line_at(mouse.row) {
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        if cb.set_text(text).is_ok() {
+                            self.copy_hint_ticks = 10; // ~2 s at 200 ms/tick
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Return the full text of the log entry rendered at terminal row `row`,
+    /// or `None` if the row is outside the log area.
+    fn log_line_at(&self, row: u16) -> Option<String> {
+        // Layout (from running.rs): log panel = top (height - 4 rows), then
+        // input bar (3 rows), then status bar (1 row).
+        // Within the log panel: indicator row at y=0, log lines start at y=1.
+        let log_area_top: u16 = 1;
+        let log_area_bottom: u16 = self.term_area.height.saturating_sub(4); // exclusive
+        if row < log_area_top || row >= log_area_bottom {
+            return None;
+        }
+        let line_idx = (row - log_area_top) as usize;
+
+        let total = self.logs.len();
+        let visible_height = (log_area_bottom - log_area_top) as usize;
+        let start = if total > visible_height && visible_height > 0 {
+            let max_offset = total - visible_height;
+            let offset = self.log_scroll.min(max_offset);
+            max_offset - offset
+        } else {
+            0
+        };
+
+        let log_idx = start + line_idx;
+        if log_idx < total {
+            let r = &self.logs[log_idx];
+            Some(format!("{} {} {}", r.timestamp, r.level.trim(), r.message))
+        } else {
+            None
+        }
+    }
+
+    async fn handle_running_key(&mut self, key: crossterm::event::KeyEvent) {
+        // Route to popup handler when a popup is open.
+        if self.popup.is_some() {
+            self.handle_popup_key(key).await;
+            return;
+        }
+
+        let ac_open = !self.ac_matches.is_empty();
+
+        match key.code {
+            KeyCode::Esc => {
+                self.input.clear();
+                self.update_autocomplete();
+            }
+
+            // Up/Down: navigate autocomplete when open, scroll log otherwise.
+            KeyCode::Up => {
+                if ac_open {
+                    self.ac_idx = self.ac_idx.saturating_sub(1);
+                } else {
+                    self.log_scroll = self.log_scroll.saturating_add(1);
+                    self.auto_scroll = false;
+                }
+            }
+            KeyCode::Down => {
+                if ac_open {
+                    self.ac_idx = (self.ac_idx + 1).min(self.ac_matches.len().saturating_sub(1));
+                } else {
+                    self.log_scroll = self.log_scroll.saturating_sub(1);
+                    if self.log_scroll == 0 {
+                        self.auto_scroll = true;
+                    }
+                }
+            }
+
+            // Tab: accept the selected suggestion (complete input, don't submit).
+            KeyCode::Tab if ac_open => {
+                let cmd = COMMANDS[self.ac_matches[self.ac_idx]].0.to_string();
+                self.input = cmd;
+                self.update_autocomplete();
+            }
+
+            // Enter: accept selected suggestion + submit; or submit raw input.
+            KeyCode::Enter => {
+                let cmd = if ac_open {
+                    COMMANDS[self.ac_matches[self.ac_idx]].0.to_string()
+                } else {
+                    self.input.trim().to_string()
+                };
+                self.input.clear();
+                self.update_autocomplete();
+                if !cmd.is_empty() {
+                    self.handle_command(&cmd).await;
+                }
+            }
+
+            KeyCode::Backspace => {
+                self.input.pop();
+                self.update_autocomplete();
+            }
+
+            KeyCode::Char(c) => {
+                self.input.push(c);
+                self.update_autocomplete();
+            }
+
+            KeyCode::PageUp => {
+                self.log_scroll = self.log_scroll.saturating_add(10);
+                self.auto_scroll = false;
+            }
+            KeyCode::PageDown => {
+                self.log_scroll = self.log_scroll.saturating_sub(10);
+                if self.log_scroll == 0 {
+                    self.auto_scroll = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Recompute `ac_matches` from the current `input`.
+    ///
+    /// Shows all commands when the user has only typed `/`, then narrows
+    /// as they type more. Clears when input is empty or lacks a `/` prefix.
+    fn update_autocomplete(&mut self) {
+        self.ac_matches.clear();
+        self.ac_idx = 0;
+
+        if !self.input.starts_with('/') {
+            return;
+        }
+
+        let prefix = self.input.as_str();
+        for (i, &(cmd, _)) in COMMANDS.iter().enumerate() {
+            if cmd.starts_with(prefix) {
+                self.ac_matches.push(i);
+            }
+        }
+
+        // If only one exact match remains and input IS the command, clear
+        // the list so it doesn't obscure the screen on a completed word.
+        if self.ac_matches.len() == 1 && COMMANDS[self.ac_matches[0]].0 == prefix {
+            self.ac_matches.clear();
+        }
+    }
+
+    async fn handle_command(&mut self, cmd: &str) {
+        match cmd {
+            "/qr" => {
+                self.popup = Some(PopupKind::QrCode);
+            }
+            "/help" => {
+                self.popup = Some(PopupKind::Help);
+            }
+            "/quit" | "/exit" => {
+                self.quit = true;
+            }
+            "/reconnect" => {
+                // Show transport picker; the running bridge stays up until the
+                // user confirms a transport, then finish_wizard() stops the old
+                // bridge and waits for BridgeStopped before starting the new one.
+                let active = self.selected_transport.as_deref();
+                let reconnect_wizard = WizardState::for_reconnect(&self.config, active);
+                self.wizard = Some(reconnect_wizard);
+                self.screen = Screen::Wizard;
+                self.needs_clear = true;
+            }
+            "/test-push" => {
+                self.handle_test_push();
+            }
+            "/push" => {
+                let active = push_active_index(&self.config);
+                self.popup = Some(PopupKind::PushConfig {
+                    step: PushPopupStep::Menu { selected: active, active },
+                });
+            }
+            "/keep-alive" => {
+                self.toggle_keep_alive();
+            }
+            "/log-level" => {
+                let current_u8 = self.log_level_arc.load(Ordering::Relaxed);
+                let selected = LOG_LEVELS.iter().position(|&(_, v)| v == current_u8).unwrap_or(1);
+                self.popup = Some(PopupKind::LogLevel { selected });
+            }
+            "/clear-logs" => {
+                self.logs.clear();
+                self.log_scroll = 0;
+                self.auto_scroll = true;
+            }
+            "/copy-logs" => {
+                if !self.logs.is_empty() {
+                    let text: String = self.logs.iter()
+                        .map(|r| format!("{} {} {}", r.timestamp, r.level.trim(), r.message))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        if cb.set_text(text).is_ok() {
+                            self.copy_hint_ticks = 10;
+                        }
+                    }
+                }
+            }
+            "/agent" => {
+                // Show agent picker; after selection the wizard continues to
+                // transport pick (or auto-selects if only one is configured),
+                // then finish_wizard() restarts the bridge with the new agent.
+                self.wizard = Some(WizardState {
+                    step: WizardStep::AgentSelect { selected: 0 },
+                    reconnect_mode: false,
+                    cancelable: true,
+                });
+                self.screen = Screen::Wizard;
+                self.needs_clear = true;
+            }
+            other => {
+                self.log_push(format!("Unknown command: {}  (type /help for list)", other));
+            }
+        }
+    }
+
+    fn handle_test_push(&mut self) {
+        let push_cfg = match &self.config.push_relay {
+            Some(p) if !p.url.is_empty() && !p.client_id.is_empty() => p.clone(),
+            _ => {
+                self.log_push("Push relay not configured.".to_string());
+                return;
+            }
+        };
+        let event_tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            use crate::push::PushRelayClient;
+            let client = PushRelayClient::new(push_cfg.url.clone(), String::new())
+                .with_jwt_credentials(push_cfg.token_url.clone(), push_cfg.client_id.clone(), push_cfg.client_secret.clone());
+            let result = client.notify("test").await.map_err(|e| e.to_string());
+            let _ = event_tx.send(AppEvent::TestPushResult(result)).await;
+        });
+        self.log_push("Sending test push notification...".to_string());
+    }
+
+    async fn handle_popup_key(&mut self, key: crossterm::event::KeyEvent) {
+        match self.popup.clone() {
+            Some(PopupKind::LogLevel { selected }) => {
+                match key.code {
+                    KeyCode::Up => {
+                        self.popup = Some(PopupKind::LogLevel { selected: selected.saturating_sub(1) });
+                    }
+                    KeyCode::Down => {
+                        self.popup = Some(PopupKind::LogLevel { selected: (selected + 1).min(LOG_LEVELS.len() - 1) });
+                    }
+                    KeyCode::Enter => {
+                        let (name, level_u8) = LOG_LEVELS[selected];
+                        self.log_level_arc.store(level_u8, Ordering::Relaxed);
+                        self.config.log_level = name.to_string();
+                        let _ = self.config.save();
+                        self.log_push(format!("Log level set to {}", name));
+                        self.close_popup();
+                    }
+                    KeyCode::Esc => {
+                        self.close_popup();
+                    }
+                    _ => {}
+                }
+            }
+            Some(PopupKind::PushConfig { step }) => {
+            self.handle_push_popup_key(key, step).await;
+        }
+        _ => {
+                if key.code == KeyCode::Esc || key.code == KeyCode::Enter {
+                    self.close_popup();
+                }
+            }
+        }
+    }
+
+    async fn handle_push_popup_key(&mut self, key: crossterm::event::KeyEvent, step: PushPopupStep) {
+        match step {
+            PushPopupStep::Menu { selected, active } => match key.code {
+                KeyCode::Up => {
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::Menu { selected: selected.saturating_sub(1), active },
+                    });
+                }
+                KeyCode::Down => {
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::Menu { selected: (selected + 1).min(2), active },
+                    });
+                }
+                KeyCode::Enter => match selected {
+                    0 => {
+                        // No Push
+                        self.config.push_relay = None;
+                        let _ = self.config.save();
+                        self.log_push("Push disabled. Messages are buffered until the client reconnects.".to_string());
+                        self.close_popup();
+                    }
+                    1 => {
+                        // Aptove
+                        let (cid, csec) = match &self.config.push_relay {
+                            Some(pr) if pr.url.contains("aptove.com") => (pr.client_id.clone(), pr.client_secret.clone()),
+                            _ => (String::new(), String::new()),
+                        };
+                        self.popup = Some(PopupKind::PushConfig {
+                            step: PushPopupStep::AptoveForm { fields: [cid, csec], field_idx: 0, error: None },
+                        });
+                    }
+                    _ => {
+                        // Self Managed
+                        let (pu, tu, cid, csec) = match &self.config.push_relay {
+                            Some(pr) if !pr.url.contains("aptove.com") => {
+                                (pr.url.clone(), pr.token_url.clone(), pr.client_id.clone(), pr.client_secret.clone())
+                            }
+                            _ => (String::new(), String::new(), String::new(), String::new()),
+                        };
+                        self.popup = Some(PopupKind::PushConfig {
+                            step: PushPopupStep::SelfManagedForm { fields: [pu, tu, cid, csec], field_idx: 0, error: None },
+                        });
+                    }
+                }
+                KeyCode::Esc => { self.close_popup(); }
+                _ => {}
+            },
+
+            PushPopupStep::AptoveForm { mut fields, field_idx, .. } => match key.code {
+                KeyCode::Char(c) => {
+                    fields[field_idx].push(c);
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::AptoveForm { fields, field_idx, error: None },
+                    });
+                }
+                KeyCode::Backspace => {
+                    fields[field_idx].pop();
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::AptoveForm { fields, field_idx, error: None },
+                    });
+                }
+                KeyCode::Tab => {
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::AptoveForm { fields, field_idx: (field_idx + 1) % 2, error: None },
+                    });
+                }
+                KeyCode::Enter => {
+                    if field_idx < 1 {
+                        self.popup = Some(PopupKind::PushConfig {
+                            step: PushPopupStep::AptoveForm { fields, field_idx: field_idx + 1, error: None },
+                        });
+                    } else {
+                        let client_id = fields[0].trim().to_string();
+                        let client_secret = fields[1].trim().to_string();
+                        if client_id.is_empty() || client_secret.is_empty() {
+                            self.popup = Some(PopupKind::PushConfig {
+                                step: PushPopupStep::AptoveForm {
+                                    fields, field_idx,
+                                    error: Some("Client ID and Secret are required.".to_string()),
+                                },
+                            });
+                        } else {
+                            self.config.push_relay = Some(PushRelayConfig {
+                                url: "https://push.aptove.com".to_string(),
+                                token_url: "https://token.aptove.com".to_string(),
+                                client_id,
+                                client_secret,
+                            });
+                            let _ = self.config.save();
+                            self.log_push("Aptove push service configured.".to_string());
+                            self.close_popup();
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    let active = push_active_index(&self.config);
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::Menu { selected: 1, active },
+                    });
+                }
+                _ => {}
+            },
+
+            PushPopupStep::SelfManagedForm { mut fields, field_idx, .. } => match key.code {
+                KeyCode::Char(c) => {
+                    fields[field_idx].push(c);
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::SelfManagedForm { fields, field_idx, error: None },
+                    });
+                }
+                KeyCode::Backspace => {
+                    fields[field_idx].pop();
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::SelfManagedForm { fields, field_idx, error: None },
+                    });
+                }
+                KeyCode::Tab => {
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::SelfManagedForm { fields, field_idx: (field_idx + 1) % 4, error: None },
+                    });
+                }
+                KeyCode::Enter => {
+                    if field_idx < 3 {
+                        self.popup = Some(PopupKind::PushConfig {
+                            step: PushPopupStep::SelfManagedForm { fields, field_idx: field_idx + 1, error: None },
+                        });
+                    } else {
+                        let push_url = fields[0].trim().to_string();
+                        let token_url = fields[1].trim().to_string();
+                        let client_id = fields[2].trim().to_string();
+                        let client_secret = fields[3].trim().to_string();
+                        if push_url.is_empty() || token_url.is_empty() || client_id.is_empty() || client_secret.is_empty() {
+                            self.popup = Some(PopupKind::PushConfig {
+                                step: PushPopupStep::SelfManagedForm {
+                                    fields, field_idx,
+                                    error: Some("All fields are required.".to_string()),
+                                },
+                            });
+                        } else {
+                            self.config.push_relay = Some(PushRelayConfig {
+                                url: push_url,
+                                token_url,
+                                client_id,
+                                client_secret,
+                            });
+                            let _ = self.config.save();
+                            self.log_push("Self-managed push service configured.".to_string());
+                            self.close_popup();
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    let active = push_active_index(&self.config);
+                    self.popup = Some(PopupKind::PushConfig {
+                        step: PushPopupStep::Menu { selected: 2, active },
+                    });
+                }
+                _ => {}
+            },
+        }
+    }
+
+    fn toggle_keep_alive(&mut self) {
+        self.config.keep_alive = !self.config.keep_alive;
+        if self.config.keep_alive {
+            self.keepalive = keepawake::Builder::default()
+                .display(false)
+                .idle(true)
+                .sleep(true)
+                .create()
+                .ok();
+            self.log_push("Keep-alive enabled — system sleep prevented.".to_string());
+        } else {
+            self.keepalive = None;
+            self.log_push("Keep-alive disabled — system may sleep normally.".to_string());
+        }
+        let _ = self.config.save();
+    }
+
+    fn handle_bridge_event(&mut self, event: BridgeEvent) {
+        match event {
+            BridgeEvent::TransportUp { name, addr } => {
+                self.transport_name = name.clone();
+                self.transport_addr = addr.clone();
+                self.transport_up = true;
+                self.log_push(format!("Transport up: {} — {}", name, addr));
+            }
+            BridgeEvent::TransportDown { name } => {
+                self.transport_up = false;
+                self.log_push(format!("Transport down: {}", name));
+            }
+            BridgeEvent::ClientConnected { session_id } => {
+                self.log_push(format!("Client connected (session {})", session_id));
+            }
+            BridgeEvent::ClientDisconnected { session_id } => {
+                self.log_push(format!("Client disconnected (session {})", session_id));
+            }
+            BridgeEvent::PairingCompleted => {
+                self.log_push("Pairing completed.".to_string());
+            }
+            BridgeEvent::PairingUrlReady { url, transport } => {
+                info!("Pairing URL ready for transport: {}", transport);
+                self.pairing_url = Some(url.clone());
+                // Pre-render QR string.
+                if let Ok(qr) = crate::qr::render_qr_code(&url) {
+                    self.qr_string = Some(qr);
+                }
+                // Auto-open QR popup after wizard completion so the user can
+                // pair their mobile client immediately.
+                if self.show_qr_on_ready {
+                    self.show_qr_on_ready = false;
+                    self.popup = Some(PopupKind::QrCode);
+                }
+            }
+            BridgeEvent::AgentSpawned { command } => {
+                self.log_push(format!("Agent spawned: {}", command));
+            }
+            BridgeEvent::AgentExited => {
+                self.log_push("Agent process exited.".to_string());
+            }
+            BridgeEvent::TlsFingerprint { fingerprint } => {
+                self.tls_fingerprint = Some(fingerprint.clone());
+                self.log_push(format!("TLS fingerprint: {}", fingerprint));
+            }
+            BridgeEvent::PushRegistered => {
+                self.push_up = true;
+                self.log_push("Push token registered.".to_string());
+            }
+            BridgeEvent::BridgeStopped => {
+                self.transport_up = false;
+                self.log_push("Bridge stopped.".to_string());
+                // If finish_wizard() asked us to restart after the old bridge
+                // fully releases its lock, do it now.
+                if self.restart_pending && self.wizard.is_none() {
+                    self.restart_pending = false;
+                    self.start_bridge();
+                }
+            }
+            BridgeEvent::BridgeError { message } => {
+                self.log_push(format!("Bridge error: {}", message));
+            }
+        }
+    }
+
+    fn log_push(&mut self, msg: String) {
+        use crate::tui::events::LogRecord;
+        let now = chrono::Local::now();
+        self.logs.push(LogRecord {
+            timestamp: now.format("%H:%M:%S").to_string(),
+            level: "INFO ".to_string(),
+            message: msg,
+        });
+        if self.auto_scroll {
+            self.log_scroll = 0;
+        }
+    }
+
+}
+
+
+/// Returns 0 = No Push, 1 = Aptove, 2 = Self Managed.
+fn push_active_index(config: &CommonConfig) -> usize {
+    match &config.push_relay {
+        None => 0,
+        Some(pr) if pr.url.contains("aptove.com") => 1,
+        Some(_) => 2,
+    }
+}
+
+use crate::tui::screens::wizard::AGENTS;

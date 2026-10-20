@@ -1,0 +1,22 @@
+[package]
+name = "aptove-bridge"
+version = "0.2.5"
+edition = "2021"
+authors = ["Saltuk Alakus <saltukalakus@gmail.com>"]
+description = "A secure bridge between ACP agents and mobile apps"
+repository = "https://github.com/aptove/bridge"
+license = "MIT"
+homepage = "https://github.com/aptove/bridge"
+
+[[bin]]
+name = "bridge"
+path = "src/main.rs"
+
+[dependencies]
+bridge-core = { path = "../core" }
+tokio = { version = "1.35", features = ["full"] }
+clap = { version = "4.4", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+anyhow = "1.0"
+local-ip-address = "0.6"
+crossterm = "0.28"

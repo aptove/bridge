@@ -234,22 +234,6 @@ All four fields are required. If the section is absent or any field is empty, pu
 - The relay isolates registered devices per JWT `sub` (`client_id`) — one bridge cannot trigger pushes for another bridge's devices.
 - Notification content is fixed (`"Your agent has new activity"`) to prevent leaking agent response text.
 
-### Library usage
-
-```rust
-use aptove_bridge::push::PushRelayClient;
-
-let push_client = PushRelayClient::new("https://push.aptove.com".into(), String::new())
-    .with_jwt_credentials(
-        "https://token.aptove.com".into(),
-        "your-client-id".into(),
-        "your-client-secret".into(),
-    );
-
-let bridge = StdioBridge::new("copilot --acp".into(), 8765)
-    .with_push_relay(push_client);
-```
-
 ---
 
 ## Architecture
@@ -322,4 +306,4 @@ cargo test               # Run tests
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+Apache License 2.0 — see [LICENSE](LICENSE)
