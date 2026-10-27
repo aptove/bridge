@@ -25,9 +25,9 @@ use crate::tui::{
         popup::{render_popup, url_at, PopupKind, LOG_LEVELS, PushPopupStep},
         running::{render_running, RunningState},
         wizard::{
-            compute_transport_statuses, render_wizard, wizard_backspace, wizard_confirm_agent,
-            wizard_move_down, wizard_move_up, wizard_next_field, wizard_type_char, WizardState,
-            WizardStep,
+            compute_transport_statuses, render_wizard, wizard_backspace,
+            wizard_move_down, wizard_move_up, wizard_next_field, wizard_type_char,
+            wizard_url_at, WizardState, WizardStep,
         },
     },
     widgets::input_bar::{AcEntry, AutocompleteState},
@@ -307,6 +307,14 @@ impl App {
             AppEvent::PluginSetupResult { transport_name, result } => {
                 self.handle_plugin_setup_result(transport_name, result).await;
             }
+            AppEvent::AgentTestResult { sent, received } => {
+                if let Some(ref mut w) = self.wizard {
+                    if let WizardStep::AgentTest { sent: ref mut s, received: ref mut r, .. } = w.step {
+                        *s = sent;
+                        *r = Some(received);
+                    }
+                }
+            }
             AppEvent::TestPushResult(result) => {
                 match result {
                     Ok(true)  => self.log_push("Push notification sent successfully.".to_string()),
@@ -349,10 +357,11 @@ impl App {
         let Some(ref wizard) = self.wizard else { return };
         let cancelable = wizard.cancelable;
         match &wizard.step {
-            WizardStep::AgentCustomInput { .. } => {
-                // Back to agent select.
+            WizardStep::AgentTest { command, .. } => {
+                // Back to Configure Agent with the command pre-filled.
+                let cmd = command.clone();
                 if let Some(ref mut w) = self.wizard {
-                    w.step = WizardStep::AgentSelect { selected: AGENTS.len() - 1 };
+                    w.step = WizardStep::ConfigureAgent { input: cmd };
                 }
             }
             WizardStep::PluginSetup { .. } => {
@@ -381,34 +390,35 @@ impl App {
     async fn handle_wizard_enter(&mut self) {
         let step = self.wizard.as_ref().map(|w| w.step.clone());
         match step {
-            Some(WizardStep::AgentSelect { selected }) => {
-                let result = self.wizard.as_ref().and_then(|w| {
-                    // Returns None if Custom chosen, Some(cmd) otherwise.
-                    match wizard_confirm_agent(w) {
-                        Some(maybe_cmd) => maybe_cmd.map(|cmd| (cmd, false)),
-                        None => None,
-                    }
-                });
-
-                if let Some((cmd, _)) = result {
-                    self.config.agent_command = Some(cmd);
-                    let _ = self.config.save();
-                    self.advance_wizard_after_agent().await;
-                } else if selected == AGENTS.len() - 1 {
-                    // Custom selected.
-                    if let Some(ref mut w) = self.wizard {
-                        w.step = WizardStep::AgentCustomInput { input: String::new() };
-                    }
+            Some(WizardStep::ConfigureAgent { ref input }) => {
+                if input.is_empty() { return; }
+                let cmd = input.clone();
+                let sent = crate::agent_test::TEST_MSG.to_string();
+                // Transition to test screen immediately; spawn the async test.
+                if let Some(ref mut w) = self.wizard {
+                    w.step = WizardStep::AgentTest {
+                        command: cmd.clone(),
+                        sent: sent.clone(),
+                        received: None,
+                    };
                 }
+                let event_tx = self.event_tx.clone();
+                tokio::spawn(async move {
+                    let received = crate::agent_test::run_agent_test(&cmd).await;
+                    let _ = event_tx.send(AppEvent::AgentTestResult {
+                        sent,
+                        received,
+                    }).await;
+                });
             }
 
-            Some(WizardStep::AgentCustomInput { ref input }) => {
-                if !input.is_empty() {
-                    let cmd = input.clone();
-                    self.config.agent_command = Some(cmd);
-                    let _ = self.config.save();
-                    self.advance_wizard_after_agent().await;
-                }
+            Some(WizardStep::AgentTest { ref command, ref received, .. }) => {
+                // Only advance once we have a result.
+                if received.is_none() { return; }
+                let cmd = command.clone();
+                self.config.agent_command = Some(cmd);
+                let _ = self.config.save();
+                self.advance_wizard_after_agent().await;
             }
 
             Some(WizardStep::TransportPick { selected, ts_available, .. }) => {
@@ -687,11 +697,17 @@ impl App {
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         use crossterm::event::{MouseButton, MouseEventKind};
 
-        // Left-click: check if it lands on a clickable URL in the active popup.
+        // Left-click: check for clickable URLs in the active popup or wizard.
         if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
             if let Some(ref popup) = self.popup {
                 if let Some(url) = url_at(popup, mouse.column, mouse.row, self.term_area) {
                     open::that(url).ok();
+                }
+            } else if self.screen == Screen::Wizard {
+                if let Some(ref wizard) = self.wizard {
+                    if let Some(url) = wizard_url_at(&wizard.step, mouse.column, mouse.row, self.term_area) {
+                        open::that(url).ok();
+                    }
                 }
             }
             return;
@@ -918,11 +934,10 @@ impl App {
                 }
             }
             "/agent" => {
-                // Show agent picker; after selection the wizard continues to
-                // transport pick (or auto-selects if only one is configured),
-                // then finish_wizard() restarts the bridge with the new agent.
+                // Open Configure Agent with the current command pre-filled.
+                let current = self.config.agent_command.clone().unwrap_or_default();
                 self.wizard = Some(WizardState {
-                    step: WizardStep::AgentSelect { selected: 0 },
+                    step: WizardStep::ConfigureAgent { input: current },
                     reconnect_mode: false,
                     cancelable: true,
                 });
@@ -1258,4 +1273,3 @@ fn push_active_index(config: &CommonConfig) -> usize {
     }
 }
 
-use crate::tui::screens::wizard::AGENTS;

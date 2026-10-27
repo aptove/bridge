@@ -1,30 +1,28 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::Span,
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Frame,
 };
 
+use crate::agent_test::AGENT_DOCS_URL;
 use crate::common_config::CommonConfig;
 use crate::tailscale::{is_tailscale_available, is_tailscale_installed};
 use crate::transport;
 
-pub const AGENTS: &[(&str, &str)] = &[
-    ("GitHub Copilot",           "copilot --acp"),
-    ("Google Gemini",            "gemini --experimental-acp"),
-    ("Goose AI",                 "goose acp"),
-    ("Claude Code (Claude CLI)", "claude-acp"),
-    ("Custom...",                ""),
-];
-
 /// All possible wizard steps.
 #[derive(Debug, Clone)]
 pub enum WizardStep {
-    /// Agent selection menu.
-    AgentSelect { selected: usize },
-    /// Custom agent command text input.
-    AgentCustomInput { input: String },
+    /// Agent command text input + docs link.
+    ConfigureAgent { input: String },
+    /// Connectivity test — shows what was sent and what was received.
+    AgentTest {
+        command: String,
+        sent: String,
+        /// None = still waiting; Some(Ok) = success; Some(Err) = failed.
+        received: Option<Result<String, String>>,
+    },
     /// Pick which transport to use.
     TransportPick {
         selected: usize,
@@ -34,7 +32,7 @@ pub enum WizardStep {
         statuses: Vec<String>,
     },
     /// Generic plugin wizard form — used when a transport's `wizard_fields()`
-    /// returns `Some(_)` (e.g. Cloudflare Zero Trust in enterprise builds).
+    /// returns `Some(_)`.
     PluginSetup {
         transport_name: String,
         fields: Vec<String>,
@@ -63,7 +61,11 @@ pub struct WizardState {
 impl WizardState {
     pub fn compute(config: &CommonConfig) -> Option<Self> {
         if config.agent_command.is_none() {
-            return Some(Self { step: WizardStep::AgentSelect { selected: 0 }, reconnect_mode: false, cancelable: false });
+            return Some(Self {
+                step: WizardStep::ConfigureAgent { input: String::new() },
+                reconnect_mode: false,
+                cancelable: false,
+            });
         }
 
         let enabled_count = config.enabled_transports().len();
@@ -147,7 +149,7 @@ pub fn compute_transport_statuses(
 
 pub fn wizard_type_char(state: &mut WizardState, c: char) {
     match &mut state.step {
-        WizardStep::AgentCustomInput { input } => input.push(c),
+        WizardStep::ConfigureAgent { input } => input.push(c),
         WizardStep::PluginSetup { fields, field_idx, .. } => {
             fields[*field_idx].push(c);
         }
@@ -160,7 +162,7 @@ pub fn wizard_type_char(state: &mut WizardState, c: char) {
 
 pub fn wizard_backspace(state: &mut WizardState) {
     match &mut state.step {
-        WizardStep::AgentCustomInput { input } => { input.pop(); }
+        WizardStep::ConfigureAgent { input } => { input.pop(); }
         WizardStep::PluginSetup { fields, field_idx, .. } => {
             fields[*field_idx].pop();
         }
@@ -184,75 +186,141 @@ pub fn wizard_next_field(state: &mut WizardState) {
 }
 
 pub fn wizard_move_up(state: &mut WizardState) {
-    match &mut state.step {
-        WizardStep::AgentSelect { selected } => {
-            *selected = selected.saturating_sub(1);
-        }
-        WizardStep::TransportPick { selected, .. } => {
-            *selected = selected.saturating_sub(1);
-        }
-        _ => {}
+    if let WizardStep::TransportPick { selected, .. } = &mut state.step {
+        *selected = selected.saturating_sub(1);
     }
 }
 
 pub fn wizard_move_down(state: &mut WizardState) {
-    match &mut state.step {
-        WizardStep::AgentSelect { selected } => {
-            *selected = (*selected + 1).min(AGENTS.len() - 1);
-        }
-        WizardStep::TransportPick { selected, .. } => {
-            let count = transport::all().len();
-            *selected = (*selected + 1).min(count.saturating_sub(1));
-        }
-        _ => {}
+    if let WizardStep::TransportPick { selected, .. } = &mut state.step {
+        let count = transport::all().len();
+        *selected = (*selected + 1).min(count.saturating_sub(1));
     }
 }
 
-pub fn wizard_confirm_agent(state: &WizardState) -> Option<Option<String>> {
-    if let WizardStep::AgentSelect { selected } = &state.step {
-        let (_, cmd) = AGENTS[*selected];
-        if cmd.is_empty() { None } else { Some(Some(cmd.to_string())) }
-    } else {
-        None
+// ── URL hit-testing ───────────────────────────────────────────────────────────
+
+/// Return the docs URL if `(col, row)` lands on the clickable link shown in
+/// the `ConfigureAgent` panel.
+pub fn wizard_url_at(step: &WizardStep, col: u16, row: u16, term: Rect) -> Option<&'static str> {
+    if matches!(step, WizardStep::ConfigureAgent { .. }) {
+        let popup = centered(70, 80, term);
+        let inner = Rect {
+            x: popup.x + 1,
+            y: popup.y + 1,
+            width: popup.width.saturating_sub(2),
+            height: popup.height.saturating_sub(2),
+        };
+        // Docs link is rendered at inner.y + 5 (must match render_wizard below).
+        let url_row = inner.y + 5;
+        if row == url_row && col >= inner.x && col < inner.x + inner.width {
+            return Some(AGENT_DOCS_URL);
+        }
     }
+    None
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 pub fn render_wizard(frame: &mut Frame, state: &WizardState) {
     match &state.step {
-        WizardStep::AgentSelect { selected } => {
+        WizardStep::ConfigureAgent { input } => {
             let hint = if state.cancelable {
-                "↑/↓ navigate   Enter confirm   Esc cancel"
+                "Enter test connection   Esc cancel"
             } else {
-                "↑/↓ navigate   Enter confirm"
+                "Enter test connection"
             };
-            let inner = wizard_panel(frame, "Select Agent", hint);
-            let items: Vec<ListItem> = AGENTS.iter().enumerate().map(|(i, (name, cmd))| {
-                let prefix = if i == *selected { "> " } else { "  " };
-                let label = if cmd.is_empty() {
-                    format!("{}{}", prefix, name)
-                } else {
-                    format!("{}{}  ({})", prefix, name, cmd)
-                };
-                ListItem::new(label).style(if i == *selected {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::White)
-                })
-            }).collect();
-            let list_area = Rect { y: inner.y + 1, height: inner.height.saturating_sub(2), ..inner };
-            frame.render_widget(List::new(items), list_area);
+            let inner = wizard_panel(frame, "Configure Agent", hint);
+
+            // Instruction
+            frame.render_widget(
+                Paragraph::new("Enter your agent command:")
+                    .style(Style::default().fg(Color::White)),
+                Rect { y: inner.y + 1, height: 1, ..inner },
+            );
+
+            // Input field
+            frame.render_widget(
+                Paragraph::new(format!("[{}█]", input))
+                    .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Rect { y: inner.y + 3, height: 1, ..inner },
+            );
+
+            // Clickable docs link — row inner.y + 5 (must match wizard_url_at)
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("Need help? ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        AGENT_DOCS_URL,
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED),
+                    ),
+                ])),
+                Rect { y: inner.y + 5, height: 1, ..inner },
+            );
         }
 
-        WizardStep::AgentCustomInput { input } => {
-            let inner = wizard_panel(frame, "Custom Agent Command", "Enter confirm   Esc back");
-            let text = format!("Command: [{}█]", input);
-            let p_area = Rect { y: inner.y + 2, height: 3, ..inner };
+        WizardStep::AgentTest { sent, received, .. } => {
+            let hint = match received {
+                Some(_) => "Enter continue   Esc back",
+                None    => "",
+            };
+            let inner = wizard_panel(frame, "Configure Agent \u{2014} Test", hint);
+
+            // [SENT] label + content
             frame.render_widget(
-                Paragraph::new(text).style(Style::default().fg(Color::White)),
-                p_area,
+                Paragraph::new("[SENT]")
+                    .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+                Rect { y: inner.y + 1, height: 1, ..inner },
             );
+            let sent_lines = wrap_text(sent, inner.width as usize);
+            let sent_h = (sent_lines.len() as u16).min(3);
+            frame.render_widget(
+                Paragraph::new(sent_lines.join("\n"))
+                    .style(Style::default().fg(Color::White)),
+                Rect { y: inner.y + 2, height: sent_h, ..inner },
+            );
+
+            let recv_label_y = inner.y + 2 + sent_h + 1;
+
+            // [RECEIVED] label
+            frame.render_widget(
+                Paragraph::new("[RECEIVED]")
+                    .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+                Rect { y: recv_label_y, height: 1, ..inner },
+            );
+
+            // Received content
+            let recv_y = recv_label_y + 1;
+            let recv_h = inner
+                .height
+                .saturating_sub(recv_y - inner.y)
+                .saturating_sub(2)
+                .max(1);
+
+            match received {
+                None => {
+                    frame.render_widget(
+                        Paragraph::new("Testing...")
+                            .style(Style::default().fg(Color::Yellow)),
+                        Rect { y: recv_y, height: 1, ..inner },
+                    );
+                }
+                Some(Ok(resp)) => {
+                    let lines = wrap_text(resp, inner.width as usize);
+                    frame.render_widget(
+                        Paragraph::new(lines.join("\n"))
+                            .style(Style::default().fg(Color::Green)),
+                        Rect { y: recv_y, height: recv_h, ..inner },
+                    );
+                }
+                Some(Err(err)) => {
+                    frame.render_widget(
+                        Paragraph::new(format!("Error: {}", err))
+                            .style(Style::default().fg(Color::Red)),
+                        Rect { y: recv_y, height: recv_h, ..inner },
+                    );
+                }
+            }
         }
 
         WizardStep::TransportPick { selected, statuses, .. } => {
@@ -262,9 +330,9 @@ pub fn render_wizard(frame: &mut Frame, state: &WizardState) {
                 "Choose Transport for This Session"
             };
             let pick_hint = if state.cancelable {
-                "↑/↓ navigate   Enter select   Esc cancel"
+                "\u{2191}/\u{2193} navigate   Enter select   Esc cancel"
             } else {
-                "↑/↓ navigate   Enter select   unconfigured → inline setup"
+                "\u{2191}/\u{2193} navigate   Enter select   unconfigured \u{2192} inline setup"
             };
             let inner = wizard_panel(frame, title, pick_hint);
             let plugins = transport::all();
@@ -299,11 +367,10 @@ pub fn render_wizard(frame: &mut Frame, state: &WizardState) {
             let plugin = transport::get(transport_name.as_str());
             let title = plugin.map(|p| p.display_name()).unwrap_or("Transport");
             let inner = wizard_panel(frame, &format!("{} Setup", title), "");
-            let p_area = Rect { y: inner.y + 2, height: 2, ..inner };
             frame.render_widget(
                 Paragraph::new(format!("Configuring {}...", title))
                     .style(Style::default().fg(Color::Yellow)),
-                p_area,
+                Rect { y: inner.y + 2, height: 2, ..inner },
             );
         }
 
@@ -320,19 +387,19 @@ pub fn render_wizard(frame: &mut Frame, state: &WizardState) {
 
         WizardStep::Done => {
             let inner = wizard_panel(frame, "Setup Complete", "");
-            let p_area = Rect { y: inner.y + 2, height: 2, ..inner };
             frame.render_widget(
-                Paragraph::new("Starting bridge...")
-                    .style(Style::default().fg(Color::Green)),
-                p_area,
+                Paragraph::new("Starting bridge...").style(Style::default().fg(Color::Green)),
+                Rect { y: inner.y + 2, height: 2, ..inner },
             );
         }
     }
 }
 
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
 fn wizard_panel(frame: &mut Frame, title: &str, hint: &str) -> Rect {
     let area = frame.area();
-    let popup = centered(60, 70, area);
+    let popup = centered(70, 80, area);
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .title(format!(" {} ", title))
@@ -342,14 +409,9 @@ fn wizard_panel(frame: &mut Frame, title: &str, hint: &str) -> Rect {
     frame.render_widget(block, popup);
 
     if !hint.is_empty() {
-        let hint_area = Rect {
-            y: inner.y + inner.height.saturating_sub(1),
-            height: 1,
-            ..inner
-        };
         frame.render_widget(
             Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),
-            hint_area,
+            Rect { y: inner.y + inner.height.saturating_sub(1), height: 1, ..inner },
         );
     }
     inner
@@ -386,25 +448,45 @@ fn render_form_dynamic(
         frame.render_widget(Paragraph::new(*label).style(label_style), label_area);
 
         let val = values.get(i).map(|s| s.as_str()).unwrap_or("");
-        let cursor = if i == active { "█" } else { "" };
-        let val_text = format!("[{}{}]", val, cursor);
+        let cursor = if i == active { "\u{2588}" } else { "" };
         let val_style = if i == active {
             Style::default().fg(Color::White)
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        frame.render_widget(Paragraph::new(val_text).style(val_style), value_area);
+        frame.render_widget(
+            Paragraph::new(format!("[{}{}]", val, cursor)).style(val_style),
+            value_area,
+        );
     }
 
     if let Some(err) = error {
         let y = area.y + area.height.saturating_sub(2);
-        let err_area = Rect { y, height: 1, ..area };
         frame.render_widget(
             Paragraph::new(format!("Error: {}", err))
                 .style(Style::default().fg(Color::Red)),
-            err_area,
+            Rect { y, height: 1, ..area },
         );
     }
+}
+
+/// Wrap `text` to lines of at most `width` characters.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        if width == 0 || line.len() <= width {
+            out.push(line.to_string());
+        } else {
+            let mut pos = 0;
+            while pos < line.len() {
+                let end = (pos + width).min(line.len());
+                out.push(line[pos..end].to_string());
+                pos = end;
+            }
+        }
+    }
+    if out.is_empty() { out.push(String::new()); }
+    out
 }
 
 fn centered(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
