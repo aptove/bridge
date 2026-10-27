@@ -6,10 +6,10 @@ The repo is a Cargo workspace with two crates:
 
 | Crate | Path | Purpose |
 |-------|------|---------|
-| `bridge-core` | `core/` | Library — all shared logic (TUI, runner, pairing, transports, push). **No Cloudflare dependency.** |
+| `bridge-core` | `core/` | Library — all shared logic (TUI, runner, pairing, transports, push). **No enterprise-specific dependencies.** |
 | `aptove-bridge` | `cli/` | OSS binary — wires up `bridge-core` with Local + Tailscale transports. |
 
-`bridge-ent` (separate private repo) is a third binary crate that depends on `bridge-core` and additionally registers the Cloudflare transport.
+`bridge-ent` (separate private repo) is a third binary crate that depends on `bridge-core` and additionally registers enterprise transports (e.g. Cloudflare tunnel, custom SSO proxies).
 
 ### TransportPlugin System
 
@@ -39,15 +39,15 @@ transport::init(plugins::oss_transports());
 
 ```rust
 transport::init(ent_transports());
-// registers: LocalTransportPlugin, TailscaleTransportPlugin, CloudflareTransportPlugin
+// registers: LocalTransportPlugin, TailscaleTransportPlugin, + enterprise plugins (e.g. CloudflareTransportPlugin)
 ```
 
 ### Rules — keep bridge-core reusable
 
-1. **No CF-specific code in `core/`.** Cloudflare tunnel logic, CF API calls, and the `CloudflareSetup` wizard step live in `bridge-ent`, not here.
-2. **No hardcoded transport names in `core/`.** The wizard, runner, and config code must work with whatever transports are registered — never branch on `"cloudflare"` inside `core/`.
-3. **`wizard_fields()` / `run_setup()` drive async wizard steps.** Transports that require user input (e.g. a tunnel ID) implement these methods; the TUI calls them generically without knowing the transport type.
-4. **`WizardState::compute()` must not reference specific transport names.** It may check counts (0 enabled, 2+ enabled) and call `transport::get(name).wizard_fields()` to decide whether a setup step is needed — but must not hard-code `"cloudflare"` or any other name.
+1. **No enterprise-specific code in `core/`.** Any transport-specific logic, external API calls, and custom wizard steps belong in `bridge-ent`'s `plugins.rs`, not in `core/`.
+2. **No hardcoded transport names in `core/`.** The wizard, runner, and config code must work with whatever transports are registered — never branch on any specific transport name (e.g. `"cloudflare"`, `"vpn"`) inside `core/`.
+3. **`wizard_fields()` / `run_setup()` drive async wizard steps.** Transports that require user input (e.g. a tunnel ID, an API key) implement these methods; the TUI calls them generically without knowing the transport type.
+4. **`WizardState::compute()` must not reference specific transport names.** It may check counts (0 enabled, 2+ enabled) and call `transport::get(name).wizard_fields()` to decide whether a setup step is needed — but must never hard-code any transport name.
 5. **Adding a new transport:** implement `TransportPlugin` in the appropriate binary's `plugins.rs`, add it to `init()`, and optionally implement `wizard_fields()` + `run_setup()` if it needs first-run configuration.
 
 
@@ -66,7 +66,7 @@ Every screen (wizard step, popup) **must** have an Escape option:
 - First-run wizard (no config): `Esc` on `AgentSelect` / `TransportPick` is a no-op (the user must configure before the bridge can start).
 - Wizard sub-steps (`AgentCustomInput`): `Esc` goes back one step (to `AgentSelect`).
 - `PushSetup`: `Esc` skips push setup and advances the wizard.
-- `CloudflareSetup`: `Esc` goes back to `TransportPick`.
+- Enterprise wizard steps (e.g. a tunnel setup screen): `Esc` goes back to `TransportPick`.
 
 The hint text shown at the bottom of each wizard panel must include `Esc cancel` (cancelable mode) or the appropriate action label so users can discover the shortcut.
 
@@ -77,7 +77,7 @@ Every time the bridge starts, `WizardState::compute()` checks `CommonConfig` for
 1. `agent_command` missing → `AgentSelect` screen
 2. 0 enabled transports → `TransportPick` screen (user must choose a transport)
 3. 2+ enabled transports → `TransportPick` screen (user must choose which to run)
-4. Cloudflare transport enabled but `tunnel_id` absent → `CloudflareSetup` form
+4. Enterprise transport enabled but missing required config → transport's own wizard step (driven by `wizard_fields()` in `bridge-ent`)
 5. `push_relay` absent → push config popup shown after bridge starts
 
 **`CommonConfig::default()` must NOT pre-enable any transport.** The transport map starts empty so that a brand-new installation always shows the transport picker. Existing configs loaded from `common.toml` are unaffected.
