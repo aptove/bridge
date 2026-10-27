@@ -32,3 +32,35 @@ Every time the bridge starts, `WizardState::compute()` checks `CommonConfig` for
 **`CommonConfig::default()` must NOT pre-enable any transport.** The transport map starts empty so that a brand-new installation always shows the transport picker. Existing configs loaded from `common.toml` are unaffected.
 
 After any wizard completion (`finish_wizard()`), the QR pairing popup is opened automatically as soon as the bridge reports `PairingUrlReady`. This lets the user pair their mobile client immediately without typing `/qr`.
+
+## Releasing a New Version Tag
+
+When asked to create a new release tag (e.g. `v0.2.7`), follow these steps in order:
+
+1. **Delete any prematurely pushed tag** (if already pushed by mistake):
+   ```bash
+   git push origin --delete vX.Y.Z
+   git tag -d vX.Y.Z
+   ```
+
+2. **Bump versions** in both `cli/Cargo.toml` and `core/Cargo.toml`:
+   - Update `version = "old"` → `version = "new"` in each file.
+
+3. **Commit and push the version bump:**
+   ```bash
+   git add cli/Cargo.toml core/Cargo.toml
+   git commit -m "chore: bump version to vX.Y.Z"
+   git push
+   ```
+
+4. **Create and push the tag from main:**
+   ```bash
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+
+5. The GitHub Actions release workflow triggers automatically and publishes:
+   - GitHub Release with shell/PowerShell installers + binary archives
+   - npm packages to npmjs.com (`@aptove/bridge` and platform sub-packages)
+
+> **Note:** The npm package version is managed automatically by the workflow — do not update `npm/bridge/package.json` manually.
