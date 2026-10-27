@@ -13,20 +13,18 @@ Bridge is actively developed and we are still experimenting. Until the first sta
 
 | Mode | Use Case | Documentation |
 |------|----------|---------------|
-| **Local** | Same Wi-Fi network, secure pairing with QR code | [docs/transport/local.md](docs/transport/local.md) |
-| **Cloudflare** | Remote access via Cloudflare Zero Trust (internet-accessible) | [docs/transport/cloudflare.md](docs/transport/cloudflare.md) |
-| **Tailscale** | Private overlay network via MagicDNS + HTTPS (Recommended) | [docs/transport/tailscale.md](docs/transport/tailscale.md) |
+| **Local** | Same Wi-Fi network, secure pairing with QR code | [docs.aptove.com](https://docs.aptove.com/bridge/local-transport) |
+| **Tailscale** | Private overlay network via MagicDNS + HTTPS (Recommended) | [docs.aptove.com](https://docs.aptove.com/bridge/tailscale-transport) |
 
 ## Features
 
 - 📱 **QR Code Pairing**: Secure one-time code pairing via QR scan
 - 🔒 **TLS + Certificate Pinning**: Self-signed certificates with fingerprint validation
 - ⚡ **WebSocket Streaming**: Real-time bidirectional communication
-- 🌐 **Multi-Transport**: Local, Cloudflare, Tailscale — configure and switch between them
+- 🌐 **Multi-Transport**: Local and Tailscale — configure and switch between them
 - 🔑 **Stable Agent Identity**: `agent_id` UUID persisted in `common.toml` for multi-transport dedup on mobile
 - 🔔 **Push Notifications**: Wake the mobile app when the agent responds while backgrounded
 - 🖥️ **Terminal UI**: Interactive TUI for setup and day-to-day management
-- 🦀 **Embeddable**: Use as a library with `StdioBridge` for in-process deployment
 
 ---
 
@@ -64,15 +62,6 @@ log_level  = "WARN"  # ERROR / WARN / INFO / DEBUG / TRACE
 enabled = true
 port    = 8765
 tls     = true
-
-[transports.cloudflare]
-enabled       = false
-hostname      = "https://agent.example.com"
-tunnel_id     = "abc123"
-tunnel_secret = "..."
-account_id    = "..."
-client_id     = "client.access"
-client_secret = "xxxxx"
 
 [transports.tailscale-serve]
 enabled = false
@@ -172,10 +161,10 @@ Mobile app (backgrounded)          Bridge                      Push relay
 
 Push is triggered by **passive failure detection** — the bridge never polls for connectivity:
 
-| Site | Trigger | Source |
-|------|---------|--------|
-| Agent pool (main path) | Agent stdout arrives; `broadcast::Sender::send()` returns `Err` (zero receivers — no WebSocket client connected) | `src/agent_pool.rs` |
-| Active connection drop | `ws_sender.send()` returns `Err` (client disconnected mid-stream); message is buffered before notify | `src/bridge.rs` |
+| Site | Trigger |
+|------|---------|
+| Agent pool (main path) | Agent stdout arrives; `broadcast::Sender::send()` returns `Err` (zero receivers — no WebSocket client connected) |
+| Active connection drop | `ws_sender.send()` returns `Err` (client disconnected mid-stream); message is buffered before notify |
 
 A 30-second per-client debounce prevents notification storms when the agent is verbose.
 
@@ -211,7 +200,7 @@ All four fields are required. If the section is absent or any field is empty, pu
 └─────────────┘                    └───────────────────────┘        └──────────────┘
 ```
 
-The agent process is spawned as a subprocess via stdio — `StdioBridge` handles the WebSocket server, TLS, auth, and pairing in-process alongside your application.
+The agent process is spawned as a subprocess via stdio. The bridge handles the WebSocket server, TLS, auth, and pairing.
 
 ---
 
