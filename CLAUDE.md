@@ -142,3 +142,11 @@ When asked to create a new release tag (e.g. `v0.2.7`), follow these steps in or
 
 5. The GitHub Actions release workflow triggers automatically and publishes:
    - GitHub Release with shell/PowerShell installers + binary archives
+
+6. **Update the submodule pointer in the monorepo** (`openspec-acp-swift-sdk`):
+   ```bash
+   cd /path/to/openspec-acp-swift-sdk
+   git add bridge
+   git commit -m "chore: update bridge submodule pointer to vX.Y.Z"
+   git push
+   ```
