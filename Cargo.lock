@@ -149,7 +149,6 @@ version = "0.2.5"
 dependencies = [
  "anyhow",
  "bridge-core",
- "clap",
  "crossterm",
  "local-ip-address",
  "tokio",
