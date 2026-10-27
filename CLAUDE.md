@@ -1,63 +1,80 @@
-# Bridge TUI Development Guidelines
+# Bridge Development Guidelines
 
-## Workspace Structure and OSS / Enterprise Split
+## OSS / Enterprise Architecture
 
-The repo is a Cargo workspace with two crates:
+The repo is a Cargo workspace split into two crates:
 
-| Crate | Path | Purpose |
-|-------|------|---------|
-| `bridge-core` | `core/` | Library — all shared logic (TUI, runner, pairing, transports, push). **No enterprise-specific dependencies.** |
-| `aptove-bridge` | `cli/` | OSS binary — wires up `bridge-core` with Local + Tailscale transports. |
+| Crate | Path | Role |
+|-------|------|------|
+| `bridge-core` | `core/` | Shared library — consumed by both the OSS binary and `bridge-ent`. |
+| `aptove-bridge` | `cli/` | OSS binary — depends on `bridge-core`, registers OSS-only plugins. |
 
-`bridge-ent` (separate private repo) is a third binary crate that depends on `bridge-core` and additionally registers enterprise transports (e.g. Cloudflare tunnel, custom SSO proxies).
+`bridge-ent` (separate private repo) is a third binary crate that also depends on `bridge-core` and adds enterprise-only features on top. **`bridge-core` is the shared foundation for both.**
 
-### TransportPlugin System
+---
 
-All transport implementations use the `TransportPlugin` trait defined in `core/src/transport.rs`:
+## CRITICAL: Changes to `core/` May Break `bridge-ent`
+
+Because `bridge-ent` depends on `bridge-core` as a library, any change to `core/` is effectively a change to a public API consumed by an external crate. **Before making any of the following changes to `core/`, stop and ask the developer for approval:**
+
+- Removing or narrowing `pub` visibility on any type, function, trait, or field
+- Changing the signature of a `pub trait` or `pub struct` in a breaking way (adding a required method, removing a field, changing a type)
+- Adding a new required method to a trait that `bridge-ent` likely implements (e.g. `TransportPlugin`)
+- Adding a new dependency to `core/Cargo.toml` that could conflict with `bridge-ent`'s dependency tree
+- Removing or restricting an extension point (a plugin registry, a trait, a callback hook) that `bridge-ent` relies on
+- Moving OSS-specific logic into `core/` where it would leak into `bridge-ent`
+- Hardcoding behavior in `core/` that was previously delegated to plugins or registered at runtime
+
+**When in doubt, flag it.** Say: "This change to `core/` may affect `bridge-ent` — please confirm before I proceed."
+
+---
+
+## General Rules for `core/`
+
+1. **No enterprise-specific code.** `core/` must compile cleanly with zero knowledge of what `bridge-ent` adds. Any feature that only enterprise builds need belongs in `bridge-ent`.
+
+2. **No hardcoded feature names or assumptions about what is registered.** Logic in `core/` must work generically regardless of which plugins, hooks, or extensions are registered at runtime.
+
+3. **Extension points must remain open.** If `core/` exposes a registry, trait, or callback, do not remove it or make it harder to implement without first confirming with the developer.
+
+4. **Prefer default trait methods over required ones.** When adding a method to a trait in `core/`, give it a default implementation so existing implementors in `bridge-ent` are not broken.
+
+---
+
+## Plugin/Extension Pattern (Transport System as Example)
+
+The transport system illustrates the general pattern used throughout `bridge-core` for extensibility:
+
+- `core/src/transport.rs` defines a `TransportPlugin` trait and a global registry (`OnceLock`)
+- `cli/src/main.rs` calls `transport::init(oss_transports())` at startup
+- `bridge-ent` calls `transport::init(ent_transports())` with its own set of plugins
+
+This same pattern should be followed for any future extension point: define the trait and registry in `core/`, register implementations in the binary (`cli/` or `bridge-ent`).
+
+### TransportPlugin trait (reference)
 
 ```rust
 pub trait TransportPlugin: Send + Sync + 'static {
-    fn name(&self) -> &'static str;          // key in common.toml [transports]
-    fn display_name(&self) -> &'static str;  // label in the TUI picker
+    fn name(&self) -> &'static str;
+    fn display_name(&self) -> &'static str;
     fn is_configured(&self, config: &CommonConfig) -> bool;
     fn build(&self, cfg, common, config_dir, advertise_addr, cwd) -> Result<TransportHandle>;
-    fn wizard_fields(&self) -> Option<Vec<WizardField>> { None }   // None = self-configuring
-    fn run_setup(&self, fields) -> Future<Result<TransportConfig>> // only if wizard_fields is Some
+    fn wizard_fields(&self) -> Option<Vec<WizardField>> { None }  // default = self-configuring
+    fn run_setup(&self, fields) -> Future<Result<TransportConfig>> // only needed if wizard_fields is Some
 }
 ```
 
-Transports are registered once at startup via `transport::init(plugins)` and accessed globally via `transport::all()` / `transport::get(name)`.
+---
 
-### OSS binary registration (`cli/src/main.rs`)
+## TUI Guidelines
 
-```rust
-transport::init(plugins::oss_transports());
-// registers: LocalTransportPlugin, TailscaleTransportPlugin
-```
-
-### Enterprise binary registration (bridge-ent)
-
-```rust
-transport::init(ent_transports());
-// registers: LocalTransportPlugin, TailscaleTransportPlugin, + enterprise plugins (e.g. CloudflareTransportPlugin)
-```
-
-### Rules — keep bridge-core reusable
-
-1. **No enterprise-specific code in `core/`.** Any transport-specific logic, external API calls, and custom wizard steps belong in `bridge-ent`'s `plugins.rs`, not in `core/`.
-2. **No hardcoded transport names in `core/`.** The wizard, runner, and config code must work with whatever transports are registered — never branch on any specific transport name (e.g. `"cloudflare"`, `"vpn"`) inside `core/`.
-3. **`wizard_fields()` / `run_setup()` drive async wizard steps.** Transports that require user input (e.g. a tunnel ID, an API key) implement these methods; the TUI calls them generically without knowing the transport type.
-4. **`WizardState::compute()` must not reference specific transport names.** It may check counts (0 enabled, 2+ enabled) and call `transport::get(name).wizard_fields()` to decide whether a setup step is needed — but must never hard-code any transport name.
-5. **Adding a new transport:** implement `TransportPlugin` in the appropriate binary's `plugins.rs`, add it to `init()`, and optionally implement `wizard_fields()` + `run_setup()` if it needs first-run configuration.
-
-
-## Dark Background Requirement
+### Dark Background Requirement
 
 Every popup and wizard screen **must** render a full-screen dark background (`Color::Black`) before drawing any popup widget. This is implemented in `app.rs`'s draw loop by rendering a `Block::default().style(Style::default().bg(Color::Black))` over `frame.area()` before calling `render_wizard` or `render_popup`.
 
 Do **not** rely solely on the popup widget's own `bg(Color::Black)` style — that only covers the popup rectangle, leaving the log panel visible through the surrounding area.
 
-## Escape Requirement
+### Escape Requirement
 
 Every screen (wizard step, popup) **must** have an Escape option:
 
@@ -66,11 +83,11 @@ Every screen (wizard step, popup) **must** have an Escape option:
 - First-run wizard (no config): `Esc` on `AgentSelect` / `TransportPick` is a no-op (the user must configure before the bridge can start).
 - Wizard sub-steps (`AgentCustomInput`): `Esc` goes back one step (to `AgentSelect`).
 - `PushSetup`: `Esc` skips push setup and advances the wizard.
-- Enterprise wizard steps (e.g. a tunnel setup screen): `Esc` goes back to `TransportPick`.
+- Enterprise wizard steps: `Esc` goes back to `TransportPick`.
 
 The hint text shown at the bottom of each wizard panel must include `Esc cancel` (cancelable mode) or the appropriate action label so users can discover the shortcut.
 
-## First-Run and Missing-Config Wizard
+### First-Run and Missing-Config Wizard
 
 Every time the bridge starts, `WizardState::compute()` checks `CommonConfig` for missing or incomplete configuration and runs the relevant setup screen **before** launching the bridge. The checks in order are:
 
@@ -83,6 +100,8 @@ Every time the bridge starts, `WizardState::compute()` checks `CommonConfig` for
 **`CommonConfig::default()` must NOT pre-enable any transport.** The transport map starts empty so that a brand-new installation always shows the transport picker. Existing configs loaded from `common.toml` are unaffected.
 
 After any wizard completion (`finish_wizard()`), the QR pairing popup is opened automatically as soon as the bridge reports `PairingUrlReady`. This lets the user pair their mobile client immediately without typing `/qr`.
+
+---
 
 ## Releasing a New Version Tag
 
