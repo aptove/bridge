@@ -307,14 +307,6 @@ impl App {
             AppEvent::PluginSetupResult { transport_name, result } => {
                 self.handle_plugin_setup_result(transport_name, result).await;
             }
-            AppEvent::AgentTestResult { sent, received } => {
-                if let Some(ref mut w) = self.wizard {
-                    if let WizardStep::AgentTest { sent: ref mut s, received: ref mut r, .. } = w.step {
-                        *s = sent;
-                        *r = Some(received);
-                    }
-                }
-            }
             AppEvent::TestPushResult(result) => {
                 match result {
                     Ok(true)  => self.log_push("Push notification sent successfully.".to_string()),
@@ -357,13 +349,6 @@ impl App {
         let Some(ref wizard) = self.wizard else { return };
         let cancelable = wizard.cancelable;
         match &wizard.step {
-            WizardStep::AgentTest { command, .. } => {
-                // Back to Configure Agent with the command pre-filled.
-                let cmd = command.clone();
-                if let Some(ref mut w) = self.wizard {
-                    w.step = WizardStep::ConfigureAgent { input: cmd };
-                }
-            }
             WizardStep::PluginSetup { .. } => {
                 // Back to transport picker.
                 let ts_available = crate::tailscale::is_tailscale_available();
@@ -393,28 +378,6 @@ impl App {
             Some(WizardStep::ConfigureAgent { ref input }) => {
                 if input.is_empty() { return; }
                 let cmd = input.clone();
-                // Transition to test screen immediately; spawn the async test.
-                if let Some(ref mut w) = self.wizard {
-                    w.step = WizardStep::AgentTest {
-                        command: cmd.clone(),
-                        sent: "Connecting...".to_string(),
-                        received: None,
-                    };
-                }
-                let event_tx = self.event_tx.clone();
-                tokio::spawn(async move {
-                    let (sent, received) = crate::agent_test::run_agent_test(&cmd).await;
-                    let _ = event_tx.send(AppEvent::AgentTestResult {
-                        sent,
-                        received,
-                    }).await;
-                });
-            }
-
-            Some(WizardStep::AgentTest { ref command, ref received, .. }) => {
-                // Only advance once we have a result.
-                if received.is_none() { return; }
-                let cmd = command.clone();
                 self.config.agent_command = Some(cmd);
                 let _ = self.config.save();
                 self.advance_wizard_after_agent().await;

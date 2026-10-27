@@ -6,7 +6,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::agent_test::AGENT_DOCS_URL;
+const AGENT_DOCS_URL: &str = "https://docs.aptove.com/bridge/agent";
+
 use crate::common_config::CommonConfig;
 use crate::tailscale::{is_tailscale_available, is_tailscale_installed};
 use crate::transport;
@@ -16,13 +17,6 @@ use crate::transport;
 pub enum WizardStep {
     /// Agent command text input + docs link.
     ConfigureAgent { input: String },
-    /// Connectivity test — shows what was sent and what was received.
-    AgentTest {
-        command: String,
-        sent: String,
-        /// None = still waiting; Some(Ok) = success; Some(Err) = failed.
-        received: Option<Result<String, String>>,
-    },
     /// Pick which transport to use.
     TransportPick {
         selected: usize,
@@ -226,9 +220,9 @@ pub fn render_wizard(frame: &mut Frame, state: &WizardState) {
     match &state.step {
         WizardStep::ConfigureAgent { input } => {
             let hint = if state.cancelable {
-                "Enter test connection   Esc cancel"
+                "Enter save   Esc cancel"
             } else {
-                "Enter test connection"
+                "Enter save"
             };
             let inner = wizard_panel(frame, "Configure Agent", hint);
 
@@ -257,70 +251,6 @@ pub fn render_wizard(frame: &mut Frame, state: &WizardState) {
                 ])),
                 Rect { y: inner.y + 5, height: 1, ..inner },
             );
-        }
-
-        WizardStep::AgentTest { sent, received, .. } => {
-            let hint = match received {
-                Some(_) => "Enter continue   Esc back",
-                None    => "",
-            };
-            let inner = wizard_panel(frame, "Configure Agent \u{2014} Test", hint);
-
-            // [SENT] label + content
-            frame.render_widget(
-                Paragraph::new("[SENT]")
-                    .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
-                Rect { y: inner.y + 1, height: 1, ..inner },
-            );
-            let sent_lines = wrap_text(sent, inner.width as usize);
-            let sent_h = (sent_lines.len() as u16).min(3);
-            frame.render_widget(
-                Paragraph::new(sent_lines.join("\n"))
-                    .style(Style::default().fg(Color::White)),
-                Rect { y: inner.y + 2, height: sent_h, ..inner },
-            );
-
-            let recv_label_y = inner.y + 2 + sent_h + 1;
-
-            // [RECEIVED] label
-            frame.render_widget(
-                Paragraph::new("[RECEIVED]")
-                    .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
-                Rect { y: recv_label_y, height: 1, ..inner },
-            );
-
-            // Received content
-            let recv_y = recv_label_y + 1;
-            let recv_h = inner
-                .height
-                .saturating_sub(recv_y - inner.y)
-                .saturating_sub(2)
-                .max(1);
-
-            match received {
-                None => {
-                    frame.render_widget(
-                        Paragraph::new("Testing...")
-                            .style(Style::default().fg(Color::Yellow)),
-                        Rect { y: recv_y, height: 1, ..inner },
-                    );
-                }
-                Some(Ok(resp)) => {
-                    let lines = wrap_text(resp, inner.width as usize);
-                    frame.render_widget(
-                        Paragraph::new(lines.join("\n"))
-                            .style(Style::default().fg(Color::Green)),
-                        Rect { y: recv_y, height: recv_h, ..inner },
-                    );
-                }
-                Some(Err(err)) => {
-                    frame.render_widget(
-                        Paragraph::new(format!("Error: {}", err))
-                            .style(Style::default().fg(Color::Red)),
-                        Rect { y: recv_y, height: recv_h, ..inner },
-                    );
-                }
-            }
         }
 
         WizardStep::TransportPick { selected, statuses, .. } => {
@@ -470,24 +400,6 @@ fn render_form_dynamic(
     }
 }
 
-/// Wrap `text` to lines of at most `width` characters.
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in text.lines() {
-        if width == 0 || line.len() <= width {
-            out.push(line.to_string());
-        } else {
-            let mut pos = 0;
-            while pos < line.len() {
-                let end = (pos + width).min(line.len());
-                out.push(line[pos..end].to_string());
-                pos = end;
-            }
-        }
-    }
-    if out.is_empty() { out.push(String::new()); }
-    out
-}
 
 fn centered(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let vertical = Layout::default()

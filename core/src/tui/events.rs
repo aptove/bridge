@@ -37,8 +37,6 @@ pub enum AppEvent {
     Resize(u16, u16),
     /// Result of an async plugin setup triggered from the wizard.
     PluginSetupResult { transport_name: String, result: Result<TransportConfig, String> },
-    /// Result of the agent connectivity test in the Configure Agent wizard step.
-    AgentTestResult { sent: String, received: Result<String, String> },
     /// Result of an async test-push triggered from the running screen.
     TestPushResult(Result<bool, String>),
 }
