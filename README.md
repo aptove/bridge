@@ -93,22 +93,11 @@ All bridge state lives in the config directory. These files are created automati
 
 Running `bridge` opens the interactive TUI. On first launch it runs the setup wizard:
 
-```
-Select an agent to run:
-  [1] Copilot  (copilot --acp)
-  [2] Gemini   (gemini --experimental-acp)
-  [3] Goose    (goose acp)
-  [4] Custom
-Enter number [1]:
-```
+1. **Configure Agent** — enter the shell command that starts your ACP-compatible agent (e.g. `copilot --acp`, `gemini --experimental-acp`, `goose acp`). See [docs.aptove.com/bridge/agent](https://docs.aptove.com/bridge/agent) for a full list.
+2. **Choose Transport** — pick Local (same Wi-Fi) or Tailscale.
+3. **QR Code** — scan with the mobile app to pair.
 
-Select **Custom** to enter any ACP-compatible agent command, for example:
-
-```
-npx @agentclientprotocol/claude-agent-acp
-```
-
-After the wizard completes the bridge starts and displays a QR code for pairing.
+After the wizard completes the bridge starts. Type `/` in the input bar to see available commands.
 
 ### TUI slash commands
 
@@ -125,7 +114,6 @@ Type these in the input bar while the bridge is running:
 | `/log-level` | Change log verbosity (default: WARN) |
 | `/clear-logs` | Clear the log view |
 | `/copy-logs` | Copy all logs to clipboard |
-| `/help` | List all commands |
 | `/quit` | Exit the bridge |
 
 ---
