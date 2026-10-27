@@ -38,9 +38,6 @@ cargo build --release
 
 # Start the bridge — opens the interactive TUI (setup wizard on first run)
 ./target/release/bridge
-
-# Use a custom config directory
-./target/release/bridge -c ./my-config
 ```
 
 On first launch the setup wizard runs automatically: it asks you to choose an agent command and a transport, then starts the bridge and shows a QR code for pairing.
@@ -52,11 +49,6 @@ Scan the QR code with the mobile app to connect.
 All settings live in `common.toml`, created automatically by the setup wizard on first run.
 
 **Default location:** `.aptove-bridge/` directory inside the working directory where the bridge is launched.
-
-Override with `-c` / `--config-dir`:
-```bash
-bridge -c ./my-config
-```
 
 #### Example `common.toml`
 
@@ -108,25 +100,9 @@ All bridge state lives in the config directory. These files are created automati
 | `key.pem` | Private key for the TLS certificate. |
 | `cert-extra-sans.json` | Tracks extra Subject Alternative Names (IPs/hostnames) baked into the TLS cert. When these change, the cert is automatically regenerated. |
 
-### CLI
+### TUI
 
-```
-bridge [OPTIONS] [COMMAND]
-```
-
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--config-dir <PATH>` | `-c` | Use a custom config directory instead of `.aptove-bridge/` |
-| `--version` | `-v` | Print version |
-
-| Subcommand | Description |
-|------------|-------------|
-| *(none)* | Start the TUI (setup wizard if needed, then running screen) |
-| `setup` | Re-run the Cloudflare Zero Trust setup wizard |
-
-#### `bridge` (default — TUI)
-
-Running `bridge` with no arguments opens the interactive TUI. On first launch it runs the setup wizard:
+Running `bridge` opens the interactive TUI. On first launch it runs the setup wizard:
 
 ```
 Select an agent to run:
@@ -144,16 +120,6 @@ npx @agentclientprotocol/claude-agent-acp
 ```
 
 After the wizard completes the bridge starts and displays a QR code for pairing.
-
-#### `bridge setup`
-
-Re-runs the Cloudflare Zero Trust setup wizard as a TUI flow. Use this to reconfigure your Cloudflare tunnel credentials without restarting the running bridge.
-
-```bash
-bridge setup
-```
-
-No flags are needed — the wizard guides you through everything interactively.
 
 ### TUI slash commands
 
