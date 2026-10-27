@@ -27,6 +27,7 @@ pub fn render_running(
     state: &RunningState<'_>,
     logs: &[LogRecord],
     log_scroll: usize,
+    hovered_log_row: Option<u16>,
     input: &str,
     version: &str,
     autocomplete: Option<&AutocompleteState<'_>>,
@@ -47,7 +48,7 @@ pub fn render_running(
         addr: state.transport_addr.clone(),
         up: state.transport_up,
     }];
-    render_log_panel(frame, chunks[0], logs, log_scroll, state.copy_hint);
+    render_log_panel(frame, chunks[0], logs, log_scroll, hovered_log_row, state.copy_hint);
     render_input_bar(frame, chunks[1], input, "Type / for commands", autocomplete);
     render_status_bar(frame, chunks[2], version, &transports, state.push_up, state.keep_alive);
 }

@@ -13,6 +13,7 @@ pub fn render_log_panel(
     area: Rect,
     logs: &[LogRecord],
     scroll_offset: usize,
+    hovered_row: Option<u16>,
     copy_hint: Option<&str>,
 ) {
     // Top row: scroll indicator (empty when at tail, text when scrolled up).
@@ -50,11 +51,21 @@ pub fn render_log_panel(
         indicator_area,
     );
 
+    // Convert the hovered terminal row to a visual index within the log area.
+    let hovered_visual: Option<usize> = hovered_row.and_then(|row| {
+        if row >= log_area.y && row < log_area.y + log_area.height {
+            Some((row - log_area.y) as usize)
+        } else {
+            None
+        }
+    });
+
     // Render log lines — no borders, no block.
     let end = (start + visible_height).min(total);
     let items: Vec<ListItem> = logs[start..end]
         .iter()
-        .map(|r| {
+        .enumerate()
+        .map(|(visual_idx, r)| {
             let level_style = match r.level.trim() {
                 "ERROR" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 "WARN"  => Style::default().fg(Color::Yellow),
@@ -66,7 +77,12 @@ pub fn render_log_panel(
                 Span::styled(format!("{} ", r.level), level_style),
                 Span::raw(r.message.clone()),
             ]);
-            ListItem::new(line)
+            let is_hovered = hovered_visual == Some(visual_idx);
+            if is_hovered {
+                ListItem::new(line).style(Style::default().bg(Color::DarkGray))
+            } else {
+                ListItem::new(line)
+            }
         })
         .collect();
 
