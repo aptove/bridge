@@ -111,9 +111,13 @@ pub struct App {
 
     // Countdown ticks for the "Copied!" indicator in the log panel (200ms per tick).
     copy_hint_ticks: u8,
+    // Message shown while copy_hint_ticks > 0.
+    copy_hint_msg: String,
 
-    // Terminal row the mouse is currently hovering over (None when off-screen or in a popup/wizard).
+    // Terminal row the mouse is currently over (hover without button, or drag endpoint).
     hovered_log_row: Option<u16>,
+    // Terminal row where the left button was pressed; Some = drag in progress.
+    drag_start_row: Option<u16>,
 
     // When true, start_bridge() is called as soon as BridgeStopped is received.
     // Used to avoid a lock-file race when restarting: the old bridge must fully
@@ -184,7 +188,9 @@ impl App {
             term_area: Rect::default(),
             needs_clear: false,
             copy_hint_ticks: 0,
+            copy_hint_msg: String::new(),
             hovered_log_row: None,
+            drag_start_row: None,
             restart_pending: false,
             show_qr_on_ready: false,
         }
@@ -236,7 +242,7 @@ impl App {
                             transport_up: self.transport_up,
                             push_up: self.push_up,
                             keep_alive: self.config.keep_alive,
-                            copy_hint: if self.copy_hint_ticks > 0 { Some(" Copied!") } else { None },
+                            copy_hint: if self.copy_hint_ticks > 0 { Some(self.copy_hint_msg.as_str()) } else { None },
                         };
                         // Build autocomplete entries for the renderer (no allocation if empty).
                         let ac_entries: Vec<AcEntry<'_>> = self.ac_matches.iter().map(|&i| AcEntry {
@@ -248,8 +254,19 @@ impl App {
                         } else {
                             Some(AutocompleteState { matches: &ac_entries, selected: self.ac_idx })
                         };
-                        let hover = if self.popup.is_none() { self.hovered_log_row } else { None };
-                        render_running(frame, &running_state, &self.logs, self.log_scroll, hover, &self.input, VERSION, ac_state.as_ref());
+                        // Compute the terminal-row highlight range to pass to the renderer.
+                        // During a drag: highlight the full range between anchor and current row.
+                        // During plain hover: highlight the single row under the cursor.
+                        let log_highlight = if self.popup.is_none() {
+                            match (self.drag_start_row, self.hovered_log_row) {
+                                (Some(a), Some(b)) => Some((a.min(b), a.max(b))),
+                                (None, Some(r))    => Some((r, r)),
+                                _                  => None,
+                            }
+                        } else {
+                            None
+                        };
+                        render_running(frame, &running_state, &self.logs, self.log_scroll, log_highlight, &self.input, VERSION, ac_state.as_ref());
                         if let Some(ref popup) = self.popup {
                             // Dark overlay so log content doesn't show through the popup area.
                             // Clear first (resets cell symbols), then paint background black.
@@ -664,7 +681,7 @@ impl App {
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         use crossterm::event::{MouseButton, MouseEventKind};
 
-        // Left-click: check for clickable URLs first; otherwise copy the hovered log line.
+        // Left button down: start a drag selection (or check for URL clicks).
         if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
             let mut clicked_url = false;
             if let Some(ref popup) = self.popup {
@@ -681,7 +698,9 @@ impl App {
                 }
             }
             if !clicked_url && self.screen == Screen::Running && self.popup.is_none() {
-                self.try_copy_log_at(mouse.row);
+                // Begin drag tracking; the selection copies on mouse-up.
+                self.drag_start_row = Some(mouse.row);
+                self.hovered_log_row = Some(mouse.row);
             }
             return;
         }
@@ -689,6 +708,7 @@ impl App {
         // Remaining handlers only apply when on the Running screen with no popup.
         if self.screen != Screen::Running || self.popup.is_some() {
             self.hovered_log_row = None;
+            self.drag_start_row = None;
             return;
         }
         match mouse.kind {
@@ -702,24 +722,46 @@ impl App {
                     self.auto_scroll = true;
                 }
             }
-            // Hover: track the row for log-line highlighting.
-            crossterm::event::MouseEventKind::Moved => {
+            // Hover (no button held): track row for single-line highlight.
+            MouseEventKind::Moved => {
                 self.hovered_log_row = Some(mouse.row);
             }
-            // Right-click or middle-click: copy the log line under the cursor.
+            // Drag (left button held): extend the selection range.
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.hovered_log_row = Some(mouse.row);
+            }
+            // Left button released: copy single line or selected range.
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(start) = self.drag_start_row.take() {
+                    let end = self.hovered_log_row.unwrap_or(start);
+                    let (top, bot) = (start.min(end), start.max(end));
+                    self.copy_log_range(top, bot);
+                }
+            }
+            // Right-click or middle-click: copy the single line under the cursor.
             MouseEventKind::Down(MouseButton::Right | MouseButton::Middle) => {
-                self.try_copy_log_at(mouse.row);
+                self.copy_log_range(mouse.row, mouse.row);
             }
             _ => {}
         }
     }
 
-    fn try_copy_log_at(&mut self, row: u16) {
-        if let Some(text) = self.log_line_at(row) {
-            if let Ok(mut cb) = arboard::Clipboard::new() {
-                if cb.set_text(text).is_ok() {
-                    self.copy_hint_ticks = 10; // ~2 s at 200 ms/tick
-                }
+    /// Copy all log lines whose rendered terminal rows fall within [top_row, bot_row].
+    fn copy_log_range(&mut self, top_row: u16, bot_row: u16) {
+        let lines: Vec<String> = (top_row..=bot_row)
+            .filter_map(|r| self.log_line_at(r))
+            .collect();
+        if lines.is_empty() { return; }
+        let text = lines.join("\n");
+        let count = lines.len();
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            if cb.set_text(text).is_ok() {
+                self.copy_hint_msg = if count == 1 {
+                    " Copied!".to_string()
+                } else {
+                    format!(" Copied {} lines!", count)
+                };
+                self.copy_hint_ticks = 10; // ~2 s at 200 ms/tick
             }
         }
     }

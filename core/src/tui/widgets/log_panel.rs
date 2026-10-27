@@ -13,7 +13,7 @@ pub fn render_log_panel(
     area: Rect,
     logs: &[LogRecord],
     scroll_offset: usize,
-    hovered_row: Option<u16>,
+    log_highlight: Option<(u16, u16)>,
     copy_hint: Option<&str>,
 ) {
     // Top row: scroll indicator (empty when at tail, text when scrolled up).
@@ -51,13 +51,14 @@ pub fn render_log_panel(
         indicator_area,
     );
 
-    // Convert the hovered terminal row to a visual index within the log area.
-    let hovered_visual: Option<usize> = hovered_row.and_then(|row| {
-        if row >= log_area.y && row < log_area.y + log_area.height {
-            Some((row - log_area.y) as usize)
-        } else {
-            None
+    // Convert the terminal-row highlight range to visual indices within the log area.
+    let highlight_visual: Option<(usize, usize)> = log_highlight.and_then(|(top, bot)| {
+        if bot < log_area.y || top >= log_area.y + log_area.height {
+            return None;
         }
+        let first = top.saturating_sub(log_area.y) as usize;
+        let last = ((bot - log_area.y) as usize).min(visible_height.saturating_sub(1));
+        Some((first, last))
     });
 
     // Render log lines — no borders, no block.
@@ -77,8 +78,10 @@ pub fn render_log_panel(
                 Span::styled(format!("{} ", r.level), level_style),
                 Span::raw(r.message.clone()),
             ]);
-            let is_hovered = hovered_visual == Some(visual_idx);
-            if is_hovered {
+            let is_highlighted = highlight_visual
+                .map(|(first, last)| visual_idx >= first && visual_idx <= last)
+                .unwrap_or(false);
+            if is_highlighted {
                 ListItem::new(line).style(Style::default().bg(Color::DarkGray))
             } else {
                 ListItem::new(line)
