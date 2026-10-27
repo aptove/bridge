@@ -142,6 +142,3 @@ When asked to create a new release tag (e.g. `v0.2.7`), follow these steps in or
 
 5. The GitHub Actions release workflow triggers automatically and publishes:
    - GitHub Release with shell/PowerShell installers + binary archives
-   - npm packages to npmjs.com (`@aptove/bridge` and platform sub-packages)
-
-> **Note:** The npm package version is managed automatically by the workflow — do not update `npm/bridge/package.json` manually.
