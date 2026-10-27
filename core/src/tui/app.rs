@@ -47,7 +47,6 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/clear-logs",  "Clear the log view"),
     ("/copy-logs",   "Copy all logs to clipboard"),
     ("/agent",       "Change the AI agent"),
-    ("/help",        "List commands"),
     ("/quit",        "Exit the bridge"),
 ];
 
@@ -870,9 +869,6 @@ impl App {
             "/qr" => {
                 self.popup = Some(PopupKind::QrCode);
             }
-            "/help" => {
-                self.popup = Some(PopupKind::Help);
-            }
             "/quit" | "/exit" => {
                 self.quit = true;
             }
@@ -934,7 +930,7 @@ impl App {
                 self.needs_clear = true;
             }
             other => {
-                self.log_push(format!("Unknown command: {}  (type /help for list)", other));
+                self.log_push(format!("Unknown command: {other}  (type / for autocomplete)"));
             }
         }
     }

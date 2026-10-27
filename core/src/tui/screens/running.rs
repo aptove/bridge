@@ -48,6 +48,6 @@ pub fn render_running(
         up: state.transport_up,
     }];
     render_log_panel(frame, chunks[0], logs, log_scroll, state.copy_hint);
-    render_input_bar(frame, chunks[1], input, "type /help for commands", autocomplete);
+    render_input_bar(frame, chunks[1], input, "Type / for commands", autocomplete);
     render_status_bar(frame, chunks[2], version, &transports, state.push_up, state.keep_alive);
 }

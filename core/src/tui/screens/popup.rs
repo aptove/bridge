@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::tui::widgets::qr_popup::{centered_rect, render_qr_popup, render_text_popup};
+use crate::tui::widgets::qr_popup::{centered_rect, render_qr_popup};
 
 /// Log level options shown in the picker (name, u8 value).
 pub const LOG_LEVELS: &[(&str, u8)] = &[
@@ -32,26 +32,12 @@ pub enum PushPopupStep {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PopupKind {
     QrCode,
-    Help,
     /// Interactive log-level picker; `selected` is the highlighted row.
     LogLevel { selected: usize },
     /// Push notifications configuration (multi-step).
     PushConfig { step: PushPopupStep },
 }
 
-const HELP_TEXT: &str = "\
-/qr           Show QR pairing code
-/test-push    Send a test push notification
-/push         Configure push notifications
-/reconnect    Restart the transport
-/keep-alive   Toggle prevent-sleep (on by default)
-/log-level    Change log verbosity
-/clear-logs   Clear the log view
-/copy-logs    Copy all logs to clipboard
-/agent        Change the AI agent
-/help         Show this help
-/quit         Exit the bridge
-";
 
 pub fn render_popup(
     frame: &mut Frame,
@@ -62,9 +48,6 @@ pub fn render_popup(
         PopupKind::QrCode => {
             let qr = qr_string.as_deref().unwrap_or("No QR code available yet.\nStart the bridge first.");
             render_qr_popup(frame, frame.area(), "Pairing QR Code (Esc to close)", qr);
-        }
-        PopupKind::Help => {
-            render_text_popup(frame, frame.area(), "Commands (Esc to close)", HELP_TEXT);
         }
         PopupKind::LogLevel { selected } => {
             render_log_level_popup(frame, *selected);
