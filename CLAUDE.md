@@ -1,5 +1,56 @@
 # Bridge TUI Development Guidelines
 
+## Workspace Structure and OSS / Enterprise Split
+
+The repo is a Cargo workspace with two crates:
+
+| Crate | Path | Purpose |
+|-------|------|---------|
+| `bridge-core` | `core/` | Library — all shared logic (TUI, runner, pairing, transports, push). **No Cloudflare dependency.** |
+| `aptove-bridge` | `cli/` | OSS binary — wires up `bridge-core` with Local + Tailscale transports. |
+
+`bridge-ent` (separate private repo) is a third binary crate that depends on `bridge-core` and additionally registers the Cloudflare transport.
+
+### TransportPlugin System
+
+All transport implementations use the `TransportPlugin` trait defined in `core/src/transport.rs`:
+
+```rust
+pub trait TransportPlugin: Send + Sync + 'static {
+    fn name(&self) -> &'static str;          // key in common.toml [transports]
+    fn display_name(&self) -> &'static str;  // label in the TUI picker
+    fn is_configured(&self, config: &CommonConfig) -> bool;
+    fn build(&self, cfg, common, config_dir, advertise_addr, cwd) -> Result<TransportHandle>;
+    fn wizard_fields(&self) -> Option<Vec<WizardField>> { None }   // None = self-configuring
+    fn run_setup(&self, fields) -> Future<Result<TransportConfig>> // only if wizard_fields is Some
+}
+```
+
+Transports are registered once at startup via `transport::init(plugins)` and accessed globally via `transport::all()` / `transport::get(name)`.
+
+### OSS binary registration (`cli/src/main.rs`)
+
+```rust
+transport::init(plugins::oss_transports());
+// registers: LocalTransportPlugin, TailscaleTransportPlugin
+```
+
+### Enterprise binary registration (bridge-ent)
+
+```rust
+transport::init(ent_transports());
+// registers: LocalTransportPlugin, TailscaleTransportPlugin, CloudflareTransportPlugin
+```
+
+### Rules — keep bridge-core reusable
+
+1. **No CF-specific code in `core/`.** Cloudflare tunnel logic, CF API calls, and the `CloudflareSetup` wizard step live in `bridge-ent`, not here.
+2. **No hardcoded transport names in `core/`.** The wizard, runner, and config code must work with whatever transports are registered — never branch on `"cloudflare"` inside `core/`.
+3. **`wizard_fields()` / `run_setup()` drive async wizard steps.** Transports that require user input (e.g. a tunnel ID) implement these methods; the TUI calls them generically without knowing the transport type.
+4. **`WizardState::compute()` must not reference specific transport names.** It may check counts (0 enabled, 2+ enabled) and call `transport::get(name).wizard_fields()` to decide whether a setup step is needed — but must not hard-code `"cloudflare"` or any other name.
+5. **Adding a new transport:** implement `TransportPlugin` in the appropriate binary's `plugins.rs`, add it to `init()`, and optionally implement `wizard_fields()` + `run_setup()` if it needs first-run configuration.
+
+
 ## Dark Background Requirement
 
 Every popup and wizard screen **must** render a full-screen dark background (`Color::Black`) before drawing any popup widget. This is implemented in `app.rs`'s draw loop by rendering a `Block::default().style(Style::default().bg(Color::Black))` over `frame.area()` before calling `render_wizard` or `render_popup`.
