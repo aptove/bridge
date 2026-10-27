@@ -393,18 +393,17 @@ impl App {
             Some(WizardStep::ConfigureAgent { ref input }) => {
                 if input.is_empty() { return; }
                 let cmd = input.clone();
-                let sent = crate::agent_test::TEST_MSG.to_string();
                 // Transition to test screen immediately; spawn the async test.
                 if let Some(ref mut w) = self.wizard {
                     w.step = WizardStep::AgentTest {
                         command: cmd.clone(),
-                        sent: sent.clone(),
+                        sent: "Connecting...".to_string(),
                         received: None,
                     };
                 }
                 let event_tx = self.event_tx.clone();
                 tokio::spawn(async move {
-                    let received = crate::agent_test::run_agent_test(&cmd).await;
+                    let (sent, received) = crate::agent_test::run_agent_test(&cmd).await;
                     let _ = event_tx.send(AppEvent::AgentTestResult {
                         sent,
                         received,
