@@ -2,9 +2,9 @@
 
 [![crates.io](https://img.shields.io/crates/v/aptove-bridge.svg)](https://crates.io/crates/aptove-bridge)
 [![GitHub Release](https://img.shields.io/github/v/release/aptove/bridge?logo=github&label=download)](https://github.com/aptove/bridge/releases/latest)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/gD7AMxBy9y)
 [![Security Audit](https://github.com/aptove/bridge/actions/workflows/security.yml/badge.svg)](https://github.com/aptove/bridge/actions/workflows/security.yml)
 [![CodeQL Analysis](https://github.com/aptove/bridge/actions/workflows/codeql.yml/badge.svg)](https://github.com/aptove/bridge/actions/workflows/codeql.yml)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/gD7AMxBy9y)
 
 Aptove Bridge is a stand-alone app to connect any AI Agents that support Agent Client Protocol (ACP) with the Aptove Mobile App to seamlessly manage the AI agents running in a server or computer.
 

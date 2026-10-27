@@ -2,17 +2,8 @@ name: Security Audit
 
 on:
   push:
-    branches: [main]
-    paths:
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
-  pull_request:
-    paths:
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
-  schedule:
-    # Run every Monday at 08:00 UTC to catch newly published advisories.
-    - cron: '0 8 * * 1'
+    tags:
+      - '**[0-9]+.[0-9]+.[0-9]+*'
 
 permissions:
   contents: read
