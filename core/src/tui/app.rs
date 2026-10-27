@@ -44,8 +44,6 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/reconnect",   "Restart the transport"),
     ("/keep-alive",  "Toggle prevent-sleep (on by default)"),
     ("/log-level",   "Change log verbosity (default: WARN)"),
-    ("/clear-logs",  "Clear the log view"),
-    ("/copy-logs",   "Copy all logs to clipboard"),
     ("/agent",       "Change the AI agent"),
     ("/quit",        "Exit the bridge"),
 ];
@@ -938,24 +936,6 @@ impl App {
                 let current_u8 = self.log_level_arc.load(Ordering::Relaxed);
                 let selected = LOG_LEVELS.iter().position(|&(_, v)| v == current_u8).unwrap_or(1);
                 self.popup = Some(PopupKind::LogLevel { selected });
-            }
-            "/clear-logs" => {
-                self.logs.clear();
-                self.log_scroll = 0;
-                self.auto_scroll = true;
-            }
-            "/copy-logs" => {
-                if !self.logs.is_empty() {
-                    let text: String = self.logs.iter()
-                        .map(|r| format!("{} {} {}", r.timestamp, r.level.trim(), r.message))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    if let Ok(mut cb) = arboard::Clipboard::new() {
-                        if cb.set_text(text).is_ok() {
-                            self.copy_hint_ticks = 10;
-                        }
-                    }
-                }
             }
             "/agent" => {
                 // Open Configure Agent with the current command pre-filled.

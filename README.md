@@ -112,8 +112,6 @@ Type these in the input bar while the bridge is running:
 | `/reconnect` | Restart the transport |
 | `/keep-alive` | Toggle prevent-sleep (on by default) |
 | `/log-level` | Change log verbosity (default: WARN) |
-| `/clear-logs` | Clear the log view |
-| `/copy-logs` | Copy all logs to clipboard |
 | `/quit` | Exit the bridge |
 
 ---
