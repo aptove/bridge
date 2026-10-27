@@ -6,6 +6,7 @@ use tracing_subscriber::prelude::*;
 
 use bridge_core::common_config::CommonConfig;
 use bridge_core::transport;
+use bridge_core::file_log_layer::FileLogLayer;
 use bridge_core::tui::{
     app::App,
     events::AppEvent,
@@ -32,9 +33,12 @@ async fn run_tui() -> Result<()> {
     let log_level_arc = Arc::new(AtomicU8::new(level_name_to_u8(&config.log_level)));
 
     let log_layer = TuiLogLayer::new(event_tx.clone(), Arc::clone(&log_level_arc));
+    let logs_dir = CommonConfig::config_dir().join("logs");
+    let file_log = FileLogLayer::new(logs_dir, config.log_file_max_mb, config.log_file_count);
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new("trace"))
         .with(log_layer)
+        .with(file_log)
         .init();
 
     let tick_tx = event_tx.clone();

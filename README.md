@@ -58,6 +58,9 @@ agent_command = "copilot --acp"                       # set by setup wizard
 keep_alive = true    # prevent system sleep while bridge is running
 log_level  = "WARN"  # ERROR / WARN / INFO / DEBUG / TRACE
 
+log_file_max_mb = 10  # max size per log file in MB before rotation (default: 10)
+log_file_count  = 5   # number of log files to keep (default: 5)
+
 [transports.local]
 enabled = true
 port    = 8765
@@ -88,6 +91,7 @@ All bridge state lives in the config directory. These files are created automati
 | `cert.pem` | Self-signed TLS certificate for the local transport WebSocket server. Its fingerprint is embedded in the QR pairing payload for certificate pinning. |
 | `key.pem` | Private key for the TLS certificate. |
 | `cert-extra-sans.json` | Tracks extra Subject Alternative Names (IPs/hostnames) baked into the TLS cert. When these change, the cert is automatically regenerated. |
+| `logs/bridge.log` | Current log file. Rotated when it reaches `log_file_max_mb`. Up to `log_file_count` files are kept as `bridge.log`, `bridge.log.1`, etc. |
 
 ### TUI
 

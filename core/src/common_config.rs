@@ -114,10 +114,20 @@ pub struct CommonConfig {
     /// Minimum log level shown in the TUI (ERROR / WARN / INFO / DEBUG / TRACE).
     #[serde(default = "log_level_default")]
     pub log_level: String,
+
+    /// Maximum size of each log file in MB before rotation (default: 10).
+    #[serde(default = "log_file_max_mb_default")]
+    pub log_file_max_mb: u64,
+
+    /// Number of rotated log files to keep in .aptove-bridge/logs/ (default: 5).
+    #[serde(default = "log_file_count_default")]
+    pub log_file_count: usize,
 }
 
 fn keep_alive_default() -> bool { true }
 fn log_level_default() -> String { "WARN".to_string() }
+fn log_file_max_mb_default() -> u64 { 10 }
+fn log_file_count_default() -> usize { 5 }
 
 /// Configuration for a single transport.
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -158,6 +168,8 @@ impl Default for CommonConfig {
             advertise_addr: None,
             keep_alive: true,
             log_level: "WARN".to_string(),
+            log_file_max_mb: 10,
+            log_file_count: 5,
         }
     }
 }
