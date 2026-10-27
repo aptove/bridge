@@ -103,6 +103,17 @@ After any wizard completion (`finish_wizard()`), the QR pairing popup is opened 
 
 ---
 
+## Documentation Updates
+
+When adding, changing, or removing any user-facing feature (TUI wizard steps, slash commands, transport modes, push notifications, configuration fields, CLI flags, etc.), you **must** update the following before committing:
+
+1. **`README.md`** in this repo — keep the TUI section, slash commands table, configuration examples, and feature list accurate.
+2. **`docs/bridge/`** in the docs repo — update or create the relevant page under `docs.aptove.com/bridge/`. If a page doesn't exist yet, add it and register it in `docs/docs.json` navigation.
+
+This applies to all change types: new feature, modified behaviour, and removal. Do not leave docs describing functionality that no longer exists or missing docs for functionality that does.
+
+---
+
 ## Releasing a New Version Tag
 
 When asked to create a new release tag (e.g. `v0.2.7`), follow these steps in order:
