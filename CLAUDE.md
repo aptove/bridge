@@ -6,16 +6,16 @@ The repo is a Cargo workspace split into two crates:
 
 | Crate | Path | Role |
 |-------|------|------|
-| `bridge-core` | `core/` | Shared library — consumed by both the OSS binary and `bridge-ent`. |
-| `aptove-bridge` | `cli/` | OSS binary — depends on `bridge-core`, registers OSS-only plugins. |
+| `aptove-bridge-core` | `core/` | Shared library — consumed by both the OSS binary and `bridge-ent`. |
+| `aptove-bridge` | `cli/` | OSS binary — depends on `aptove-bridge-core`, registers OSS-only plugins. |
 
-`bridge-ent` (separate private repo) is a third binary crate that also depends on `bridge-core` and adds enterprise-only features on top. **`bridge-core` is the shared foundation for both.**
+`bridge-ent` (separate private repo) is a third binary crate that also depends on `aptove-bridge-core` and adds enterprise-only features on top. **`aptove-bridge-core` is the shared foundation for both.**
 
 ---
 
 ## CRITICAL: Changes to `core/` May Break `bridge-ent`
 
-Because `bridge-ent` depends on `bridge-core` as a library, any change to `core/` is effectively a change to a public API consumed by an external crate. **Before making any of the following changes to `core/`, stop and ask the developer for approval:**
+Because `bridge-ent` depends on `aptove-bridge-core` as a library, any change to `core/` is effectively a change to a public API consumed by an external crate. **Before making any of the following changes to `core/`, stop and ask the developer for approval:**
 
 - Removing or narrowing `pub` visibility on any type, function, trait, or field
 - Changing the signature of a `pub trait` or `pub struct` in a breaking way (adding a required method, removing a field, changing a type)
@@ -43,7 +43,7 @@ Because `bridge-ent` depends on `bridge-core` as a library, any change to `core/
 
 ## Plugin/Extension Pattern (Transport System as Example)
 
-The transport system illustrates the general pattern used throughout `bridge-core` for extensibility:
+The transport system illustrates the general pattern used throughout `aptove-bridge-core` for extensibility:
 
 - `core/src/transport.rs` defines a `TransportPlugin` trait and a global registry (`OnceLock`)
 - `cli/src/main.rs` calls `transport::init(oss_transports())` at startup

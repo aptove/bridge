@@ -248,6 +248,12 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
+      - name: Publish aptove-bridge-core to crates.io
+        run: cargo publish -p aptove-bridge-core
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Wait for aptove-bridge-core to be indexed
+        run: sleep 30
       - name: Publish aptove-bridge to crates.io
         run: cargo publish -p aptove-bridge
         env:
