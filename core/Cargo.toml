@@ -6,6 +6,7 @@ authors = ["Saltuk Alakus <saltukalakus@gmail.com>"]
 description = "Core library for the Aptove bridge"
 repository = "https://github.com/aptove/bridge"
 license = "MIT"
+publish = false
 
 [lib]
 name = "bridge_core"
