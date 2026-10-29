@@ -6,6 +6,18 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+/// Scan [preferred, preferred+50] and return the first port that can be bound
+/// on `addr`. Returns `preferred` unchanged if none succeed (the real bind will
+/// then fail with a clear OS-level error message).
+fn find_free_port(addr: &str, preferred: u16) -> u16 {
+    for port in preferred..=preferred.saturating_add(50) {
+        if std::net::TcpListener::bind(format!("{}:{}", addr, port)).is_ok() {
+            return port;
+        }
+    }
+    preferred
+}
+
 use crate::bridge::StdioBridge;
 use crate::common_config::{CommonConfig, SlashCommandConfig};
 use crate::push::PushRelayClient;
@@ -36,7 +48,7 @@ pub fn build_transport(
 ///
 /// Runs until the bridge exits or `shutdown_rx` fires.
 pub async fn run_bridge(
-    config: CommonConfig,
+    mut config: CommonConfig,
     transport_name: String,
     event_tx: mpsc::Sender<AppEvent>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
@@ -64,7 +76,7 @@ pub async fn run_bridge(
         .to_string_lossy()
         .to_string();
 
-    let transport_cfg = config.transports.get(&transport_name)
+    let mut transport_cfg = config.transports.get(&transport_name)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("Transport '{}' not found in config", transport_name))?;
 
@@ -74,7 +86,34 @@ pub async fn run_bridge(
         config.bind_address.clone().unwrap_or_else(|| "0.0.0.0".to_string())
     };
 
-    let port = transport_cfg.port.unwrap_or(8765);
+    // Auto-resolve port conflicts for transports that bind a TCP port directly.
+    // If the configured (or default) port is in use, scan upward and persist
+    // the chosen port so subsequent restarts are stable without re-pairing.
+    if transport_name == "local" || transport_name == "tailscale-serve" {
+        let default_port: u16 = if transport_name == "tailscale-serve" { 8766 } else { 8765 };
+        let preferred = transport_cfg.port.unwrap_or(default_port);
+        let chosen = find_free_port(&bind_address, preferred);
+        if chosen != preferred {
+            warn!(
+                "Port {} is already in use; switching to {} for '{}' transport. Config updated.",
+                preferred, chosen, transport_name
+            );
+            if let Some(tc) = config.transports.get_mut(&transport_name) {
+                tc.port = Some(chosen);
+            }
+            if let Err(e) = config.save() {
+                warn!("Could not persist new port to config: {}", e);
+            }
+            transport_cfg = config.transports.get(&transport_name).cloned()
+                .ok_or_else(|| anyhow::anyhow!("Transport config missing after port update"))?;
+            let _ = event_tx.send(AppEvent::Bridge(BridgeEvent::PortConflictResolved {
+                old_port: preferred,
+                new_port: chosen,
+            })).await;
+        }
+    }
+
+    let port = transport_cfg.port.unwrap_or(if transport_name == "tailscale-serve" { 8766 } else { 8765 });
 
     let handle = build_transport(
         &transport_name,

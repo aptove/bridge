@@ -18,6 +18,7 @@ pub enum BridgeEvent {
     ClientDisconnected { session_id: String },
     PairingCompleted,
     PairingUrlReady { url: String, transport: String },
+    PortConflictResolved { old_port: u16, new_port: u16 },
     AgentSpawned { command: String },
     AgentExited,
     TlsFingerprint { fingerprint: String },

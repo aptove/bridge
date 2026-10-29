@@ -1259,6 +1259,15 @@ impl App {
             BridgeEvent::ClientDisconnected { session_id } => {
                 self.log_push(format!("Client disconnected (session {})", session_id));
             }
+            BridgeEvent::PortConflictResolved { old_port, new_port } => {
+                self.log_push(format!(
+                    "Port {} was in use — switched to {}. Re-scan the QR code on your phone to reconnect.",
+                    old_port, new_port
+                ));
+                // Auto-open QR popup when PairingUrlReady arrives so the user
+                // can re-pair immediately without typing /qr.
+                self.show_qr_on_ready = true;
+            }
             BridgeEvent::PairingCompleted => {
                 self.log_push("Pairing completed.".to_string());
                 // Close the QR popup automatically when the mobile app has paired.
