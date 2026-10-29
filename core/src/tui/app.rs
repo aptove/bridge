@@ -114,8 +114,8 @@ pub struct App {
 
     // Terminal row the mouse is currently over (hover without button, or drag endpoint).
     hovered_log_row: Option<u16>,
-    // Terminal row where the left button was pressed; Some = drag in progress.
-    drag_start_row: Option<u16>,
+    // Log index of the drag anchor (set on MouseDown, survives scrolling).
+    drag_start_idx: Option<usize>,
 
     // When true, start_bridge() is called as soon as BridgeStopped is received.
     // Used to avoid a lock-file race when restarting: the old bridge must fully
@@ -188,7 +188,7 @@ impl App {
             copy_hint_ticks: 0,
             copy_hint_msg: String::new(),
             hovered_log_row: None,
-            drag_start_row: None,
+            drag_start_idx: None,
             restart_pending: false,
             show_qr_on_ready: false,
         }
@@ -253,13 +253,32 @@ impl App {
                             Some(AutocompleteState { matches: &ac_entries, selected: self.ac_idx })
                         };
                         // Compute the terminal-row highlight range to pass to the renderer.
-                        // During a drag: highlight the full range between anchor and current row.
+                        // During a drag: anchor is stored as a log index; convert back to a
+                        // screen row, clamping to the visible area if the anchor has scrolled
+                        // off-screen (so the entire visible portion of the selection stays lit).
                         // During plain hover: highlight the single row under the cursor.
                         let log_highlight = if self.popup.is_none() {
-                            match (self.drag_start_row, self.hovered_log_row) {
-                                (Some(a), Some(b)) => Some((a.min(b), a.max(b))),
-                                (None, Some(r))    => Some((r, r)),
-                                _                  => None,
+                            match (self.drag_start_idx, self.hovered_log_row) {
+                                (Some(start_idx), Some(hovered)) => {
+                                    let anchor = self.log_idx_to_screen_row(start_idx);
+                                    let (top, bot) = match anchor {
+                                        Some(a) => (a.min(hovered), a.max(hovered)),
+                                        None => {
+                                            // Anchor is off-screen; clamp to the edge of the
+                                            // visible area so the full visible selection is lit.
+                                            let log_top: u16 = 1;
+                                            let log_bot = self.term_area.height.saturating_sub(5);
+                                            if start_idx < self.first_visible_log_idx() {
+                                                (log_top, hovered.max(log_top))
+                                            } else {
+                                                (hovered.min(log_bot), log_bot)
+                                            }
+                                        }
+                                    };
+                                    Some((top, bot))
+                                }
+                                (None, Some(r)) => Some((r, r)),
+                                _ => None,
                             }
                         } else {
                             None
@@ -696,8 +715,8 @@ impl App {
                 }
             }
             if !clicked_url && self.screen == Screen::Running && self.popup.is_none() {
-                // Begin drag tracking; the selection copies on mouse-up.
-                self.drag_start_row = Some(mouse.row);
+                // Begin drag tracking; anchor stored as a log index so it survives scrolling.
+                self.drag_start_idx = self.log_idx_at_row(mouse.row);
                 self.hovered_log_row = Some(mouse.row);
             }
             return;
@@ -706,18 +725,27 @@ impl App {
         // Remaining handlers only apply when on the Running screen with no popup.
         if self.screen != Screen::Running || self.popup.is_some() {
             self.hovered_log_row = None;
-            self.drag_start_row = None;
+            self.drag_start_idx = None;
             return;
         }
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 self.log_scroll = self.log_scroll.saturating_add(3);
                 self.auto_scroll = false;
+                // Extend an in-progress drag selection to the top of the visible area.
+                if self.drag_start_idx.is_some() {
+                    self.hovered_log_row = Some(1);
+                }
             }
             MouseEventKind::ScrollDown => {
                 self.log_scroll = self.log_scroll.saturating_sub(3);
                 if self.log_scroll == 0 {
                     self.auto_scroll = true;
+                }
+                // Extend an in-progress drag selection to the bottom of the visible area.
+                if self.drag_start_idx.is_some() {
+                    let log_bot = self.term_area.height.saturating_sub(5);
+                    self.hovered_log_row = Some(log_bot);
                 }
             }
             // Hover (no button held): track row for single-line highlight.
@@ -728,30 +756,34 @@ impl App {
             MouseEventKind::Drag(MouseButton::Left) => {
                 self.hovered_log_row = Some(mouse.row);
             }
-            // Left button released: copy single line or selected range.
+            // Left button released: copy single line or selected range by log index.
             MouseEventKind::Up(MouseButton::Left) => {
-                if let Some(start) = self.drag_start_row.take() {
-                    let end = self.hovered_log_row.unwrap_or(start);
-                    let (top, bot) = (start.min(end), start.max(end));
-                    self.copy_log_range(top, bot);
+                if let Some(start_idx) = self.drag_start_idx.take() {
+                    let end_row = self.hovered_log_row.unwrap_or(1);
+                    let end_idx = self.log_idx_at_row(end_row).unwrap_or(start_idx);
+                    let (top, bot) = (start_idx.min(end_idx), start_idx.max(end_idx));
+                    self.copy_log_range_by_idx(top, bot);
                 }
             }
             // Right-click or middle-click: copy the single line under the cursor.
             MouseEventKind::Down(MouseButton::Right | MouseButton::Middle) => {
-                self.copy_log_range(mouse.row, mouse.row);
+                if let Some(idx) = self.log_idx_at_row(mouse.row) {
+                    self.copy_log_range_by_idx(idx, idx);
+                }
             }
             _ => {}
         }
     }
 
-    /// Copy all log lines whose rendered terminal rows fall within [top_row, bot_row].
-    fn copy_log_range(&mut self, top_row: u16, bot_row: u16) {
-        let lines: Vec<String> = (top_row..=bot_row)
-            .filter_map(|r| self.log_line_at(r))
+    /// Copy log lines by index range (inclusive). Works correctly across scroll positions.
+    fn copy_log_range_by_idx(&mut self, top_idx: usize, bot_idx: usize) {
+        let lines: Vec<String> = (top_idx..=bot_idx)
+            .filter_map(|i| self.logs.get(i))
+            .map(|r| format!("{} {} {}", r.timestamp, r.level.trim(), r.message))
             .collect();
         if lines.is_empty() { return; }
-        let text = lines.join("\n");
         let count = lines.len();
+        let text = lines.join("\n");
         if let Ok(mut cb) = arboard::Clipboard::new() {
             if cb.set_text(text).is_ok() {
                 self.copy_hint_msg = if count == 1 {
@@ -764,36 +796,48 @@ impl App {
         }
     }
 
-    /// Return the full text of the log entry rendered at terminal row `row`,
+    /// Convert a terminal row to the index of the log entry rendered there,
     /// or `None` if the row is outside the log area.
-    fn log_line_at(&self, row: u16) -> Option<String> {
-        // Layout (from running.rs): log panel = top (height - 4 rows), then
-        // input bar (3 rows), then status bar (1 row).
-        // Within the log panel: indicator row at y=0, log lines start at y=1.
+    fn log_idx_at_row(&self, row: u16) -> Option<usize> {
         let log_area_top: u16 = 1;
-        let log_area_bottom: u16 = self.term_area.height.saturating_sub(4); // exclusive
-        if row < log_area_top || row >= log_area_bottom {
-            return None;
-        }
+        let log_area_bottom: u16 = self.term_area.height.saturating_sub(4);
+        if row < log_area_top || row >= log_area_bottom { return None; }
         let line_idx = (row - log_area_top) as usize;
-
         let total = self.logs.len();
         let visible_height = (log_area_bottom - log_area_top) as usize;
         let start = if total > visible_height && visible_height > 0 {
             let max_offset = total - visible_height;
-            let offset = self.log_scroll.min(max_offset);
-            max_offset - offset
-        } else {
-            0
-        };
+            max_offset - self.log_scroll.min(max_offset)
+        } else { 0 };
+        let idx = start + line_idx;
+        if idx < total { Some(idx) } else { None }
+    }
 
-        let log_idx = start + line_idx;
-        if log_idx < total {
-            let r = &self.logs[log_idx];
-            Some(format!("{} {} {}", r.timestamp, r.level.trim(), r.message))
-        } else {
-            None
-        }
+    /// Convert a log index to the terminal row it occupies in the current view,
+    /// or `None` if the entry is scrolled out of the visible area.
+    fn log_idx_to_screen_row(&self, idx: usize) -> Option<u16> {
+        let log_area_top: u16 = 1;
+        let log_area_bottom: u16 = self.term_area.height.saturating_sub(4);
+        let total = self.logs.len();
+        let visible_height = (log_area_bottom - log_area_top) as usize;
+        let start = if total > visible_height && visible_height > 0 {
+            let max_offset = total - visible_height;
+            max_offset - self.log_scroll.min(max_offset)
+        } else { 0 };
+        if idx < start || idx >= start + visible_height { return None; }
+        Some(log_area_top + (idx - start) as u16)
+    }
+
+    /// Return the index of the first log entry visible in the current view.
+    fn first_visible_log_idx(&self) -> usize {
+        let log_area_top: u16 = 1;
+        let log_area_bottom: u16 = self.term_area.height.saturating_sub(4);
+        let total = self.logs.len();
+        let visible_height = (log_area_bottom - log_area_top) as usize;
+        if total > visible_height && visible_height > 0 {
+            let max_offset = total - visible_height;
+            max_offset - self.log_scroll.min(max_offset)
+        } else { 0 }
     }
 
     async fn handle_running_key(&mut self, key: crossterm::event::KeyEvent) {
