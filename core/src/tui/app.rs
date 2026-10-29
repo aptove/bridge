@@ -1316,7 +1316,16 @@ impl App {
                 }
             }
             BridgeEvent::BridgeError { message } => {
-                self.log_push(format!("Bridge error: {}", message));
+                use crate::tui::events::LogRecord;
+                let now = chrono::Local::now();
+                self.logs.push(LogRecord {
+                    timestamp: now.format("%H:%M:%S").to_string(),
+                    level: "ERROR".to_string(),
+                    message: format!("Bridge error: {}", message),
+                });
+                if self.auto_scroll {
+                    self.log_scroll = 0;
+                }
             }
         }
     }
