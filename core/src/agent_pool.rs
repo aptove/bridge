@@ -84,7 +84,7 @@ impl PooledAgent {
     pub async fn kill(&mut self) {
         info!("Killing pooled agent process");
         if let Err(e) = self.process.kill().await {
-            warn!("Failed to kill agent process: {}", e);
+            error!("Failed to kill agent process: {}", e);
         }
     }
 
@@ -143,7 +143,7 @@ impl AgentPool {
                     let mut overflow = agent.overflow_buffer.lock().await;
                     let overflow_count = overflow.len();
                     if overflow_count > 0 {
-                        info!("[push-dbg] draining {} overflow message(s) into replay buffer", overflow_count);
+                        debug!("draining {} overflow message(s) into replay buffer", overflow_count);
                     }
                     for msg in overflow.drain(..) {
                         if agent.message_buffer.len() < self.config.max_buffer_size {
@@ -165,7 +165,7 @@ impl AgentPool {
 
                 return Ok((tx, rx, buffered, true, cached_init, cached_session, broadcast_tx));
             } else {
-                info!("Agent process died, removing from pool");
+                warn!("Agent process died, removing from pool");
                 self.agents.remove(token);
             }
         }
@@ -276,7 +276,7 @@ impl AgentPool {
                 match stdout_tx.send(line) {
                     Ok(receiver_count) => {
                         // Message was sent successfully; receiver_count = number of active WS clients
-                        info!("[push-dbg] agent stdout → broadcast OK ({} receiver(s) connected)", receiver_count);
+                        debug!("agent stdout → broadcast OK ({} receiver(s) connected)", receiver_count);
                     }
                     Err(e) => {
                         // No receivers = no WebSocket client connected; buffer the message and push
@@ -284,26 +284,25 @@ impl AgentPool {
                         if buffer_enabled {
                             let mut buf = overflow_for_stdout.lock().await;
                             if buf.len() < max_buffer {
-                                info!("[push-dbg] 0 receivers — buffering message #{} ({}B): {}",
+                                debug!("0 receivers — buffering message #{} ({}B): {}",
                                     buf.len() + 1,
                                     msg.len(),
                                     msg.chars().take(120).collect::<String>());
                                 buf.push(msg);
                             } else {
-                                warn!("[push-dbg] overflow buffer full ({} messages) — dropping agent message", buf.len());
                             }
                         } else {
-                            info!("[push-dbg] 0 receivers — buffering disabled, message dropped");
+                            debug!("0 receivers — buffering disabled, message dropped");
                         }
                         if let Some(ref push_relay) = push_relay_for_stdout {
                             let name = agent_name_for_stdout.read().await.clone();
-                            info!("[push-dbg] triggering push notification (overflow-buffer path) for '{}'", name);
+                            debug!("triggering push notification (overflow-buffer path) for '{}'", name);
                             match push_relay.notify(&name).await {
-                                Ok(sent) => info!("[push-dbg] push relay notify: sent={}", sent),
-                                Err(e) => warn!("[push-dbg] push relay notify failed: {}", e),
+                                Ok(sent) => debug!("push relay notify: sent={}", sent),
+                                Err(e) => warn!("push relay notify failed: {}", e),
                             }
                         } else {
-                            info!("[push-dbg] no push relay configured — push skipped");
+                            debug!("no push relay configured — push skipped");
                         }
                     }
                 }
@@ -479,7 +478,7 @@ impl AgentPool {
             if agent.message_buffer.len() < self.config.max_buffer_size {
                 agent.message_buffer.push(message);
             } else {
-                warn!("Message buffer full for agent, dropping message");
+                error!("Message buffer full for agent, dropping message");
             }
         }
     }

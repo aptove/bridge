@@ -126,6 +126,26 @@ cargo test
 
 ---
 
+## Logging
+
+Use the correct `tracing` log level for every message:
+
+| Level | When to use |
+|-------|-------------|
+| `error!` | Unrecoverable failures or silent data loss (kill failed, message dropped, critical setup failed) |
+| `warn!` | Degraded behaviour the user should notice (unexpected process death, send failure, port conflict) |
+| `info!` | Normal lifecycle events (bridge started, transport up, agent spawned, pairing completed) |
+| `debug!` | Internal detail useful when diagnosing issues but noisy in production (replay counts, individual messages, per-send status) |
+
+**Rules:**
+
+1. Never use `info!` on an error path — use `warn!` or `error!`.
+2. Use `error!` when data may be silently lost or a critical setup step fails.
+3. Diagnostic/instrumentation logs belong at `debug!`. Do **not** tag them with `[push-dbg]` or similar markers — just use `debug!` directly.
+4. TUI panel messages follow the same hierarchy: use `log_push_warn()` for WARN-level events. For ERROR-level events push a `LogRecord { level: "ERROR".to_string(), ... }` directly — do not use `log_push()` (INFO) for failure messages.
+
+---
+
 ## Documentation Updates
 
 When adding, changing, or removing any user-facing feature (TUI wizard steps, slash commands, transport modes, push notifications, configuration fields, CLI flags, etc.), you **must** update the following before committing:

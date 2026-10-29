@@ -991,9 +991,9 @@ where
         // client has a valid session context to process them.
         let total = buffered.len();
         if total > 0 {
-            info!("📦 [push-dbg] Replaying {} buffered message(s) after session resume", total);
+            debug!("Replaying {} buffered message(s) after session resume", total);
             for (i, msg) in buffered.into_iter().enumerate() {
-                info!("📦 [push-dbg] Buffered [{}/{}] ({}B): {}", i + 1, total, msg.len(), msg.chars().take(200).collect::<String>());
+                debug!("Buffered [{}/{}] ({}B): {}", i + 1, total, msg.len(), msg.chars().take(200).collect::<String>());
                 if let Err(e) = ws_sender.send(Message::Text(msg.into())).await {
                     error!("Failed to replay buffered message: {}", e);
                 }
@@ -1007,7 +1007,7 @@ where
                 r#"{{"jsonrpc":"2.0","method":"bridge/bufferReplayComplete","params":{{"count":{}}}}}"#,
                 total
             );
-            info!("📦 [push-dbg] Sending bridge/bufferReplayComplete (count={})", total);
+            debug!("Sending bridge/bufferReplayComplete (count={})", total);
             if let Err(e) = ws_sender.send(Message::Text(notif.into())).await {
                 error!("Failed to send bufferReplayComplete: {}", e);
             }
@@ -1019,7 +1019,7 @@ where
     if push_relay.is_some() {
         let req = r#"{"jsonrpc":"2.0","method":"bridge/requestPushToken","params":{}}"#;
         if let Err(e) = ws_sender.send(Message::Text(req.into())).await {
-            warn!("Failed to send bridge/requestPushToken: {}", e);
+            error!("Failed to send bridge/requestPushToken: {}", e);
         }
     }
 
@@ -1468,32 +1468,32 @@ where
                         && is_create_session_response(&line)
                         && !line.contains("\"error\"");
 
-                    info!("[push-dbg] ws_sender.send() attempting ({} bytes)", line.len());
+                    debug!("ws_sender.send() attempting ({} bytes)", line.len());
                     debug!("📤 Sending to Mobile ({} bytes): {}", line.len(),
                         line.chars().take(200).collect::<String>());
 
                     if let Err(e) = ws_sender.send(Message::Text(line.clone().into())).await {
-                        info!("[push-dbg] ws_sender.send() FAILED — client disconnected: {}", e);
+                        warn!("ws_sender.send() FAILED — client disconnected: {}", e);
                         let mut pool = pool_for_buffer.write().await;
                         pool.buffer_message(&token_for_buffer, line);
                         // Send push notification since client is disconnected
                         if let Some(ref relay) = push_relay {
-                            info!("[push-dbg] triggering push via relay (active-connection-drop path)");
+                            debug!("triggering push via relay (active-connection-drop path)");
                             let relay = Arc::clone(relay);
                             let name = agent_name_for_push.clone();
                             tokio::spawn(async move {
                                 let agent_name = name.read().await.clone();
                                 match relay.notify(&agent_name).await {
-                                    Ok(sent) => info!("[push-dbg] push relay notify: sent={}", sent),
-                                    Err(e) => warn!("[push-dbg] push relay notify failed: {}", e),
+                                    Ok(sent) => debug!("push relay notify: sent={}", sent),
+                                    Err(e) => warn!("push relay notify failed: {}", e),
                                 }
                             });
                         } else {
-                            info!("[push-dbg] no push relay configured — push skipped");
+                            debug!("no push relay configured — push skipped");
                         }
                         break;
                     }
-                    info!("[push-dbg] ws_sender.send() OK — message delivered to connected client");
+                    debug!("ws_sender.send() OK — message delivered to connected client");
 
                     // Inject available_commands_update immediately after the session
                     // response so clients that connect to agents without native support

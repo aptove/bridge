@@ -360,7 +360,7 @@ impl App {
                 match result {
                     Ok(true)  => self.log_push("Push notification sent successfully.".to_string()),
                     Ok(false) => self.log_push("No registered devices / debounce active.".to_string()),
-                    Err(e)    => self.log_push(format!("Push notification failed: {}", e)),
+                    Err(e)    => self.log_push_warn(format!("Push notification failed: {}", e)),
                 }
             }
         }
@@ -1251,7 +1251,7 @@ impl App {
             }
             BridgeEvent::TransportDown { name } => {
                 self.transport_up = false;
-                self.log_push(format!("Transport down: {}", name));
+                self.log_push_warn(format!("Transport down: {}", name));
             }
             BridgeEvent::ClientConnected { session_id } => {
                 self.log_push(format!("Client connected (session {})", session_id));
@@ -1295,7 +1295,7 @@ impl App {
                 self.log_push(format!("Agent spawned: {}", command));
             }
             BridgeEvent::AgentExited => {
-                self.log_push("Agent process exited.".to_string());
+                self.log_push_warn("Agent process exited.".to_string());
             }
             BridgeEvent::TlsFingerprint { fingerprint } => {
                 self.tls_fingerprint = Some(fingerprint.clone());
@@ -1336,6 +1336,19 @@ impl App {
         self.logs.push(LogRecord {
             timestamp: now.format("%H:%M:%S").to_string(),
             level: "INFO ".to_string(),
+            message: msg,
+        });
+        if self.auto_scroll {
+            self.log_scroll = 0;
+        }
+    }
+
+    fn log_push_warn(&mut self, msg: String) {
+        use crate::tui::events::LogRecord;
+        let now = chrono::Local::now();
+        self.logs.push(LogRecord {
+            timestamp: now.format("%H:%M:%S").to_string(),
+            level: "WARN ".to_string(),
             message: msg,
         });
         if self.auto_scroll {
