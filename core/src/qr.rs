@@ -193,11 +193,9 @@ pub fn display_qr_code(connection_json: &str, transport: &str) -> Result<()> {
     }
     
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    let mode_label = match transport {
-        "cloudflare"      => "Cloudflare Zero Trust (internet accessible)",
-        "tailscale-serve" => "Tailscale (MagicDNS + HTTPS)",
-        _                 => "Local Network",
-    };
+    let mode_label = crate::transport::get(transport)
+        .map(|p| p.display_name())
+        .unwrap_or(transport);
     println!("  Mode: {}", mode_label);
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
     

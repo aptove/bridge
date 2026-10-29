@@ -253,7 +253,7 @@ impl StdioBridge {
         }
         
         if self.pairing_manager.is_some() {
-            info!("🔗 Pairing endpoint available at /pair/local, /pair/tailscale, /pair/cloudflare");
+            info!("🔗 Pairing endpoint available at /pair/<transport>");
         }
         
         info!("🤖 Ready to accept mobile connections...");
@@ -361,7 +361,7 @@ where
     let first_line = request_str.lines().next().unwrap_or("");
 
     // Check if this is a pairing request
-    if (first_line.contains("/pair/local") || first_line.contains("/pair/cloudflare") || first_line.contains("/pair/tailscale")) && first_line.starts_with("GET") {
+    if first_line.starts_with("GET") && first_line.contains("/pair/") {
         info!("🔗 Pairing request received");
         return handle_pairing_request(&mut stream, &request_str, pairing_manager).await;
     }
