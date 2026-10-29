@@ -1321,7 +1321,7 @@ impl App {
                 self.logs.push(LogRecord {
                     timestamp: now.format("%H:%M:%S").to_string(),
                     level: "ERROR".to_string(),
-                    message: format!("Bridge error: {}", message),
+                    message: message.to_string(),
                 });
                 if self.auto_scroll {
                     self.log_scroll = 0;
