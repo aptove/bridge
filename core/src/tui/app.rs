@@ -290,16 +290,9 @@ impl App {
                         };
                         render_running(frame, &running_state, &self.logs, self.log_scroll, log_highlight, &self.input, VERSION, ac_state.as_ref());
                         if let Some(ref popup) = self.popup {
-                            // For non-QR popups paint a full-screen black overlay so the log
-                            // panel doesn't bleed through. The QR popup is intentionally
-                            // transparent outside its widget so the user can still read logs.
-                            if !matches!(popup, PopupKind::QrCode) {
-                                frame.render_widget(Clear, frame.area());
-                                frame.render_widget(
-                                    Block::default().style(Style::default().bg(Color::Black)),
-                                    frame.area(),
-                                );
-                            }
+                            // Each popup widget has bg(Color::Black) on its own bordered block,
+                            // so the popup content is opaque. The area outside is transparent,
+                            // letting the log panel show through.
                             // Compute seconds remaining for countdown display (60s code lifetime).
                             let pairing_secs = self.pairing_received_at.map(|t| {
                                 let elapsed = t.elapsed().as_secs();
