@@ -197,8 +197,8 @@ impl StdioBridge {
     }
 
     /// Enable pairing with the given manager
-    pub fn with_pairing(mut self, pairing_manager: PairingManager) -> Self {
-        self.pairing_manager = Some(Arc::new(pairing_manager));
+    pub fn with_pairing(mut self, pairing_manager: Arc<PairingManager>) -> Self {
+        self.pairing_manager = Some(pairing_manager);
         self
     }
 

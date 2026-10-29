@@ -1,7 +1,15 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
+
+/// Mutable pairing code state — protected by a Mutex so the manager can be
+/// shared behind an Arc and renewed without recreating the whole struct.
+struct CodeState {
+    code: String,
+    created_at: Instant,
+}
 
 /// Errors that can occur during pairing
 #[derive(Error, Debug)]
@@ -66,10 +74,8 @@ impl PairingErrorResponse {
 pub struct PairingManager {
     /// Stable agent identity included in every pairing response.
     pub agent_id: String,
-    /// Current 6-digit pairing code
-    code: String,
-    /// When the code was created (for expiration)
-    created_at: Instant,
+    /// Current code and its creation timestamp — locked for interior mutability.
+    code_state: Mutex<CodeState>,
     /// Whether the code has been successfully used
     used: AtomicBool,
     /// Number of failed validation attempts (for rate limiting)
@@ -109,8 +115,7 @@ impl PairingManager {
         let code = generate_pairing_code();
         Self {
             agent_id,
-            code,
-            created_at: Instant::now(),
+            code_state: Mutex::new(CodeState { code, created_at: Instant::now() }),
             used: AtomicBool::new(false),
             attempts: AtomicU32::new(0),
             websocket_url,
@@ -141,25 +146,26 @@ impl PairingManager {
 
     /// Get the current pairing code
     #[allow(dead_code)]
-    pub fn get_code(&self) -> &str {
-        &self.code
+    pub fn get_code(&self) -> String {
+        self.code_state.lock().unwrap().code.clone()
     }
 
     /// Get the pairing URL (for QR code)
     pub fn get_pairing_url(&self, base_url: &str) -> String {
+        let code = self.code_state.lock().unwrap().code.clone();
         if self.client_id.is_some() {
             // Cloudflare mode: use /pair/cloudflare path, no fingerprint needed
-            format!("{}/pair/cloudflare?code={}", base_url, self.code)
+            format!("{}/pair/cloudflare?code={}", base_url, code)
         } else if self.tailscale_path {
             // Tailscale mode: /pair/tailscale; fingerprint present for ip mode, absent for serve mode
-            let mut url = format!("{}/pair/tailscale?code={}", base_url, self.code);
+            let mut url = format!("{}/pair/tailscale?code={}", base_url, code);
             if let Some(ref fp) = self.cert_fingerprint {
                 url.push_str("&fp=");
                 url.push_str(&urlencoding::encode(fp));
             }
             url
         } else {
-            let mut url = format!("{}/pair/local?code={}", base_url, self.code);
+            let mut url = format!("{}/pair/local?code={}", base_url, code);
             if let Some(ref fp) = self.cert_fingerprint {
                 url.push_str("&fp=");
                 url.push_str(&urlencoding::encode(fp));
@@ -170,7 +176,7 @@ impl PairingManager {
 
     /// Check if the code has expired
     pub fn is_expired(&self) -> bool {
-        self.created_at.elapsed() > self.expiry_duration
+        self.code_state.lock().unwrap().created_at.elapsed() > self.expiry_duration
     }
 
     /// Check if the code has been used
@@ -181,12 +187,24 @@ impl PairingManager {
 
     /// Get remaining seconds until expiration
     pub fn seconds_remaining(&self) -> u64 {
-        let elapsed = self.created_at.elapsed();
+        let elapsed = self.code_state.lock().unwrap().created_at.elapsed();
         if elapsed > self.expiry_duration {
             0
         } else {
             (self.expiry_duration - elapsed).as_secs()
         }
+    }
+
+    /// Generate a new pairing code and reset the expiry timer.
+    /// Resets the used flag and failed-attempt counter so the new code
+    /// starts clean.
+    pub fn renew(&self) {
+        let mut state = self.code_state.lock().unwrap();
+        state.code = generate_pairing_code();
+        state.created_at = Instant::now();
+        drop(state);
+        self.used.store(false, Ordering::SeqCst);
+        self.attempts.store(0, Ordering::SeqCst);
     }
 
     /// Validate a pairing code and return connection details if valid
@@ -202,15 +220,17 @@ impl PairingManager {
             return Err(PairingError::CodeAlreadyUsed);
         }
 
-        // Check expiration
-        if self.is_expired() {
+        // Lock once to snapshot code and check expiry atomically.
+        let state = self.code_state.lock().unwrap();
+        if state.created_at.elapsed() > self.expiry_duration {
             return Err(PairingError::InvalidCode);
         }
 
         // Validate code using constant-time comparison to prevent timing side-channel attacks.
         // A standard != on a 6-digit string would leak information about how many characters
         // match, reducing the effective search space before the rate limit is reached.
-        let code_matches = code.as_bytes().ct_eq(self.code.as_bytes());
+        let code_matches = code.as_bytes().ct_eq(state.code.as_bytes());
+        drop(state);
         if code_matches.unwrap_u8() == 0 {
             self.attempts.fetch_add(1, Ordering::SeqCst);
             return Err(PairingError::InvalidCode);

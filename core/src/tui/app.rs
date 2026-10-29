@@ -125,6 +125,10 @@ pub struct App {
     // When true, open the QR popup as soon as the pairing URL is ready.
     // Set after any wizard completion so the user can pair immediately.
     show_qr_on_ready: bool,
+
+    // When the current pairing code was issued — used to show the countdown
+    // in the QR popup and detect when auto-renew has fired.
+    pairing_received_at: Option<std::time::Instant>,
 }
 
 impl App {
@@ -191,6 +195,7 @@ impl App {
             drag_start_idx: None,
             restart_pending: false,
             show_qr_on_ready: false,
+            pairing_received_at: None,
         }
     }
 
@@ -292,7 +297,12 @@ impl App {
                                 Block::default().style(Style::default().bg(Color::Black)),
                                 frame.area(),
                             );
-                            render_popup(frame, popup, &self.qr_string);
+                            // Compute seconds remaining for countdown display (60s code lifetime).
+                            let pairing_secs = self.pairing_received_at.map(|t| {
+                                let elapsed = t.elapsed().as_secs();
+                                60u64.saturating_sub(elapsed)
+                            });
+                            render_popup(frame, popup, &self.qr_string, pairing_secs);
                         }
                     }
                 }
@@ -1255,6 +1265,7 @@ impl App {
             BridgeEvent::PairingUrlReady { url, transport } => {
                 info!("Pairing URL ready for transport: {}", transport);
                 self.pairing_url = Some(url.clone());
+                self.pairing_received_at = Some(std::time::Instant::now());
                 // Pre-render QR string.
                 if let Ok(qr) = crate::qr::render_qr_code(&url) {
                     self.qr_string = Some(qr);

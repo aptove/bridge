@@ -43,11 +43,17 @@ pub fn render_popup(
     frame: &mut Frame,
     kind: &PopupKind,
     qr_string: &Option<String>,
+    pairing_secs: Option<u64>,
 ) {
     match kind {
         PopupKind::QrCode => {
             let qr = qr_string.as_deref().unwrap_or("No QR code available yet.\nStart the bridge first.");
-            render_qr_popup(frame, frame.area(), "Pairing QR Code (Esc to close)", qr);
+            let title = match pairing_secs {
+                Some(0) => "Pairing QR Code — renewing... (Esc to close)".to_string(),
+                Some(s) => format!("Pairing QR Code — expires in {}s (Esc to close)", s),
+                None    => "Pairing QR Code (Esc to close)".to_string(),
+            };
+            render_qr_popup(frame, frame.area(), &title, qr);
         }
         PopupKind::LogLevel { selected } => {
             render_log_level_popup(frame, *selected);

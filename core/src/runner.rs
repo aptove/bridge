@@ -1,6 +1,8 @@
 //! Bridge orchestration — starts all transports and the WebSocket server.
 
 use anyhow::{Context, Result};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -83,17 +85,20 @@ pub async fn run_bridge(
     )?;
 
     let hostname = handle.hostname;
-    let pm = handle.pairing_manager;
+    let pm_owned = handle.pairing_manager;
     let tls_config = handle.tls_config;
     let _guard = handle.guard;
     let uses_external_tls = handle.uses_external_tls;
 
     // Attach push relay URL to pairing responses.
-    let pm = if let Some(ref push_cfg) = config.push_relay {
+    let pm_owned = if let Some(ref push_cfg) = config.push_relay {
         if !push_cfg.url.is_empty() && !push_cfg.client_id.is_empty() {
-            pm.with_relay_url(push_cfg.url.clone())
-        } else { pm }
-    } else { pm };
+            pm_owned.with_relay_url(push_cfg.url.clone())
+        } else { pm_owned }
+    } else { pm_owned };
+
+    // Wrap in Arc so the auto-renew task can share ownership with the bridge.
+    let pm = Arc::new(pm_owned);
 
     // Send pairing URL to TUI.
     let base_url = hostname.replace("wss://", "https://").replace("ws://", "http://");
@@ -139,7 +144,7 @@ pub async fn run_bridge(
     let mut bridge = StdioBridge::new(agent_command.clone(), port)
         .with_bind_addr(bind_address)
         .with_auth_token(Some(config.auth_token.clone()))
-        .with_pairing(pm);
+        .with_pairing(Arc::clone(&pm));
 
     if let Some(tls) = tls_config {
         bridge = bridge.with_tls(tls);
@@ -178,6 +183,33 @@ pub async fn run_bridge(
     }
     bridge = bridge.with_memory_path(memory_path);
 
+    // Spawn a task that auto-renews the pairing code every time it expires.
+    // The task stops when `cancel_tx` is dropped at the end of this function.
+    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    {
+        let pm_renew = Arc::clone(&pm);
+        let tx_renew = event_tx.clone();
+        let base_url_renew = base_url.clone();
+        let transport_renew = transport_name.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = &mut cancel_rx => break,
+                }
+                if pm_renew.is_expired() {
+                    pm_renew.renew();
+                    let _ = tx_renew.send(AppEvent::Bridge(BridgeEvent::PairingUrlReady {
+                        url: pm_renew.get_pairing_url(&base_url_renew),
+                        transport: transport_renew.clone(),
+                    })).await;
+                }
+            }
+        });
+    }
+
     let result = tokio::select! {
         r = bridge.start() => r,
         _ = &mut shutdown_rx => {
@@ -186,6 +218,8 @@ pub async fn run_bridge(
         }
     };
 
+    // Signal the renewal task to stop.
+    let _ = cancel_tx.send(());
     drop(_bridge_lock);
     let _ = event_tx.send(AppEvent::Bridge(BridgeEvent::BridgeStopped)).await;
     result
