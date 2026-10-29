@@ -103,6 +103,29 @@ After any wizard completion (`finish_wizard()`), the QR pairing popup is opened 
 
 ---
 
+## Testing
+
+When adding a new feature or changing existing behaviour, you **must**:
+
+1. **Add new tests** covering the happy path and key error cases of the changed logic.
+2. **Update any existing tests** that break due to the change — do not just delete them.
+3. **Do not skip tests** with `#[ignore]` without a comment explaining why.
+
+Tests live either inline as `#[cfg(test)]` blocks in the source file, or in `core/tests/` for integration scenarios that span multiple components. Follow the style of the surrounding file:
+
+- Pure / sync logic → `#[test]`
+- Async logic → `#[tokio::test]`
+- Integration tests that spawn real processes → `#[tokio::test]` in `core/tests/`
+
+`tempfile` is already in `[dev-dependencies]` for tests that need a real filesystem path. `mockito` is available for HTTP mocking.
+
+Run the full test suite before committing:
+```bash
+cargo test
+```
+
+---
+
 ## Documentation Updates
 
 When adding, changing, or removing any user-facing feature (TUI wizard steps, slash commands, transport modes, push notifications, configuration fields, CLI flags, etc.), you **must** update the following before committing:

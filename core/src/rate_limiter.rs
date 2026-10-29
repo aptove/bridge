@@ -109,3 +109,76 @@ impl std::fmt::Display for RateLimitError {
 }
 
 impl std::error::Error for RateLimitError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::IpAddr;
+
+    fn ip(s: &str) -> IpAddr { s.parse().unwrap() }
+
+    #[tokio::test]
+    async fn allows_first_connection() {
+        let rl = RateLimiter::new(5, 10);
+        assert!(rl.check_connection(ip("127.0.0.1")).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn blocks_after_too_many_attempts() {
+        let rl = RateLimiter::new(10, 3);
+        let addr = ip("10.0.0.1");
+        for _ in 0..3 {
+            rl.check_connection(addr).await.unwrap();
+        }
+        let result = rl.check_connection(addr).await;
+        assert!(
+            matches!(result, Err(RateLimitError::TooManyAttempts { .. })),
+            "Expected TooManyAttempts after exceeding per-minute limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocks_when_concurrent_connections_at_limit() {
+        let rl = RateLimiter::new(2, 100);
+        let addr = ip("10.0.0.2");
+        rl.add_connection(addr).await;
+        rl.add_connection(addr).await;
+        let result = rl.check_connection(addr).await;
+        assert!(
+            matches!(result, Err(RateLimitError::TooManyConnections { .. })),
+            "Expected TooManyConnections when concurrent limit reached"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_connection_frees_slot() {
+        let rl = RateLimiter::new(1, 100);
+        let addr = ip("10.0.0.3");
+        rl.add_connection(addr).await;
+        rl.remove_connection(addr).await;
+        // Slot freed — a new connection check should pass.
+        assert!(rl.check_connection(addr).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn different_ips_are_tracked_independently() {
+        let rl = RateLimiter::new(1, 3);
+        let a = ip("192.168.1.1");
+        let b = ip("192.168.1.2");
+        rl.add_connection(a).await;
+        // IP b is not affected by IP a's active connections.
+        assert!(
+            rl.check_connection(b).await.is_ok(),
+            "Connection from a different IP should be independent"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_nonexistent_connection_is_noop() {
+        let rl = RateLimiter::new(5, 10);
+        let addr = ip("10.1.1.1");
+        // Should not panic or error.
+        rl.remove_connection(addr).await;
+        assert!(rl.check_connection(addr).await.is_ok());
+    }
+}

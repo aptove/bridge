@@ -301,3 +301,84 @@ impl CommonConfig {
         serde_json::to_string(&Value::Object(map)).context("Failed to serialize connection info")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn default_has_correct_values() {
+        let cfg = CommonConfig::default();
+        assert!(cfg.transports.is_empty(), "Default config must have no transports");
+        assert!(cfg.agent_command.is_none());
+        assert_eq!(cfg.log_level, "WARN");
+        assert_eq!(cfg.log_file_max_mb, 10);
+        assert_eq!(cfg.log_file_count, 5);
+        assert!(cfg.keep_alive);
+        assert!(cfg.agent_id.is_empty());
+        assert!(cfg.auth_token.is_empty());
+    }
+
+    #[test]
+    fn load_from_empty_dir_returns_default() {
+        let dir = tempdir().unwrap();
+        let cfg = CommonConfig::load_from_dir(dir.path()).unwrap();
+        assert!(cfg.agent_id.is_empty(), "Missing file should yield default config");
+    }
+
+    #[test]
+    fn save_and_reload_roundtrip() {
+        let dir = tempdir().unwrap();
+        let mut cfg = CommonConfig::default();
+        cfg.agent_id = "test-agent-id".to_string();
+        cfg.auth_token = "my-token".to_string();
+        cfg.agent_command = Some("copilot --acp".to_string());
+        cfg.transports.insert("local".to_string(), TransportConfig {
+            enabled: true,
+            port: Some(8766),
+            ..Default::default()
+        });
+
+        cfg.save_to_dir(dir.path()).unwrap();
+
+        let reloaded = CommonConfig::load_from_dir(dir.path()).unwrap();
+        assert_eq!(reloaded.agent_id, "test-agent-id");
+        assert_eq!(reloaded.auth_token, "my-token");
+        assert_eq!(reloaded.agent_command.as_deref(), Some("copilot --acp"));
+        let local = reloaded.transports.get("local").unwrap();
+        assert!(local.enabled);
+        assert_eq!(local.port, Some(8766));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_creates_file_with_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        CommonConfig::default().save_to_dir(dir.path()).unwrap();
+        let meta = std::fs::metadata(dir.path().join("common.toml")).unwrap();
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            0o600,
+            "common.toml must be readable only by owner"
+        );
+    }
+
+    #[test]
+    fn enabled_transports_filters_disabled() {
+        let mut cfg = CommonConfig::default();
+        cfg.transports.insert("local".to_string(), TransportConfig { enabled: true, ..Default::default() });
+        cfg.transports.insert("cloudflare".to_string(), TransportConfig { enabled: false, ..Default::default() });
+        let enabled = cfg.enabled_transports();
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0].0, "local");
+    }
+
+    #[test]
+    fn enabled_transports_empty_when_all_disabled() {
+        let mut cfg = CommonConfig::default();
+        cfg.transports.insert("local".to_string(), TransportConfig { enabled: false, ..Default::default() });
+        assert!(cfg.enabled_transports().is_empty());
+    }
+}

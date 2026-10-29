@@ -268,3 +268,41 @@ pub async fn run_bridge(
     let _ = event_tx.send(AppEvent::Bridge(BridgeEvent::BridgeStopped)).await;
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::find_free_port;
+
+    #[test]
+    fn find_free_port_returns_value_in_range() {
+        // Pick a high ephemeral port unlikely to be in use.
+        let port = find_free_port("127.0.0.1", 19876);
+        assert!(
+            port >= 19876 && port <= 19876 + 50,
+            "Expected port in [19876, 19926], got {}",
+            port
+        );
+    }
+
+    #[test]
+    fn find_free_port_skips_occupied_port() {
+        // Bind a listener to occupy a specific port, then verify find_free_port skips it.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied = listener.local_addr().unwrap().port();
+        let chosen = find_free_port("127.0.0.1", occupied);
+        assert_ne!(chosen, occupied, "find_free_port must not return the occupied port");
+        // The listener is still held, so chosen must be strictly higher.
+        assert!(chosen > occupied, "Expected find_free_port to scan upward from {}", occupied);
+    }
+
+    #[test]
+    fn find_free_port_returns_preferred_when_free() {
+        // Port 0 triggers OS assignment — use a known free approach: bind then release.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let free_port = listener.local_addr().unwrap().port();
+        drop(listener); // release the port
+        // Now free_port should be available; find_free_port should return it unchanged.
+        let chosen = find_free_port("127.0.0.1", free_port);
+        assert_eq!(chosen, free_port, "find_free_port should return preferred when it is free");
+    }
+}

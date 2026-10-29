@@ -413,4 +413,98 @@ mod tests {
         assert!(url.contains("/pair/tailscale?code="), "Expected /pair/tailscale in URL, got: {}", url);
         assert!(url.contains("&fp=SHA256"), "ip mode should include fingerprint");
     }
+
+    #[test]
+    fn test_cloudflare_pairing_url() {
+        let manager = PairingManager::new_with_cf(
+            "agent-id".to_string(),
+            "wss://tunnel.example.com".to_string(),
+            "token".to_string(),
+            None,
+            Some("cf-client-id".to_string()),
+            Some("cf-secret".to_string()),
+            "/cwd".to_string(),
+        );
+        let url = manager.get_pairing_url("https://tunnel.example.com");
+        assert!(url.contains("/pair/cloudflare"), "Expected /pair/cloudflare in URL, got: {}", url);
+        assert!(url.contains("code="));
+        assert!(!url.contains("fp="), "Cloudflare mode should not include a fingerprint");
+    }
+
+    #[test]
+    fn test_seconds_remaining_initially_at_most_60() {
+        let manager = PairingManager::new_with_cf(
+            "test-agent-id".to_string(),
+            "wss://192.168.1.100:8080".to_string(),
+            "test-token".to_string(),
+            None, None, None,
+            "/tmp/test".to_string(),
+        );
+        let secs = manager.seconds_remaining();
+        assert!(secs <= 60 && secs > 0, "Expected 0 < seconds_remaining <= 60, got {}", secs);
+    }
+
+    #[test]
+    fn test_is_expired_false_immediately_after_creation() {
+        let manager = PairingManager::new_with_cf(
+            "test-agent-id".to_string(),
+            "wss://192.168.1.100:8080".to_string(),
+            "test-token".to_string(),
+            None, None, None,
+            "/tmp/test".to_string(),
+        );
+        assert!(!manager.is_expired(), "Brand-new manager should not be expired");
+    }
+
+    #[test]
+    fn test_renew_resets_used_flag() {
+        let manager = PairingManager::new_with_cf(
+            "test-agent-id".to_string(),
+            "wss://192.168.1.100:8080".to_string(),
+            "test-token".to_string(),
+            None, None, None,
+            "/tmp/test".to_string(),
+        );
+        let code = manager.get_code();
+        manager.validate(&code).unwrap();
+        assert!(manager.is_used(), "Manager should be marked used after validate");
+
+        manager.renew();
+        assert!(!manager.is_used(), "renew() should reset the used flag");
+    }
+
+    #[test]
+    fn test_renew_resets_attempt_counter() {
+        let manager = PairingManager::new_with_cf(
+            "test-agent-id".to_string(),
+            "wss://192.168.1.100:8080".to_string(),
+            "test-token".to_string(),
+            None, None, None,
+            "/tmp/test".to_string(),
+        );
+        // Exhaust 3 attempts with a wrong code.
+        for _ in 0..3 {
+            let _ = manager.validate("000000");
+        }
+        manager.renew();
+        // After renew the new code should be validatable (attempt counter reset).
+        let new_code = manager.get_code();
+        assert!(manager.validate(&new_code).is_ok(), "After renew, valid code should succeed");
+    }
+
+    #[test]
+    fn test_renew_new_code_is_valid_6_digit() {
+        let manager = PairingManager::new_with_cf(
+            "test-agent-id".to_string(),
+            "wss://192.168.1.100:8080".to_string(),
+            "test-token".to_string(),
+            None, None, None,
+            "/tmp/test".to_string(),
+        );
+        manager.renew();
+        let code = manager.get_code();
+        assert_eq!(code.len(), 6, "Renewed code must be 6 digits");
+        assert!(code.chars().all(|c| c.is_ascii_digit()), "Renewed code must be all digits");
+        assert!(!manager.is_expired(), "Manager should not be expired immediately after renew");
+    }
 }
