@@ -199,6 +199,11 @@ pub async fn run_bridge(
                     _ = interval.tick() => {}
                     _ = &mut cancel_rx => break,
                 }
+                // Detect successful pairing — notify TUI and stop renewal.
+                if pm_renew.is_used() {
+                    let _ = tx_renew.send(AppEvent::Bridge(BridgeEvent::PairingCompleted)).await;
+                    break;
+                }
                 if pm_renew.is_expired() {
                     pm_renew.renew();
                     let _ = tx_renew.send(AppEvent::Bridge(BridgeEvent::PairingUrlReady {

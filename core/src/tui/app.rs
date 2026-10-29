@@ -1261,6 +1261,11 @@ impl App {
             }
             BridgeEvent::PairingCompleted => {
                 self.log_push("Pairing completed.".to_string());
+                // Close the QR popup automatically when the mobile app has paired.
+                if self.popup == Some(PopupKind::QrCode) {
+                    self.popup = None;
+                    self.needs_clear = true;
+                }
             }
             BridgeEvent::PairingUrlReady { url, transport } => {
                 info!("Pairing URL ready for transport: {}", transport);
