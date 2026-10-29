@@ -1,7 +1,7 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    text::Text,
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
@@ -28,14 +28,33 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 /// Render a QR code popup in the center of the screen.
-pub fn render_qr_popup(frame: &mut Frame, area: Rect, title: &str, qr_string: &str) {
+///
+/// `pairing_secs`: remaining seconds shown in the title; `Some(0)` shows
+/// "renewing…", `None` omits the countdown entirely.
+pub fn render_qr_popup(frame: &mut Frame, area: Rect, pairing_secs: Option<u64>, qr_string: &str) {
     let popup_area = centered_rect(70, 80, area);
 
-    // Clear the background.
     frame.render_widget(Clear, popup_area);
 
+    let title: Line = match pairing_secs {
+        Some(0) => Line::from(vec![
+            Span::raw(" Pairing QR Code"),
+            Span::styled(" — renewing…", Style::default().fg(Color::Red)),
+            Span::raw(" (Esc to close) "),
+        ]),
+        Some(s) => Line::from(vec![
+            Span::raw(" Pairing QR Code"),
+            Span::styled(
+                format!(" — expires in {}s", s),
+                Style::default().fg(Color::Red),
+            ),
+            Span::raw(" (Esc to close) "),
+        ]),
+        None => Line::from(" Pairing QR Code (Esc to close) "),
+    };
+
     let block = Block::default()
-        .title(format!(" {} ", title))
+        .title(title)
         .borders(Borders::ALL)
         .style(Style::default().bg(Color::Black).fg(Color::White));
 
