@@ -1263,7 +1263,7 @@ impl App {
                 self.log_push(format!("Client disconnected (session {})", session_id));
             }
             BridgeEvent::PortConflictResolved { old_port, new_port } => {
-                self.log_push(format!(
+                self.log_push_warn(format!(
                     "Port {} was in use — switched to {}. Re-scan the QR code on your phone to reconnect.",
                     old_port, new_port
                 ));
