@@ -52,6 +52,7 @@ keepawake = "0.5"
 open = "5"
 arboard = "3"
 subtle = "2"
+shlex = "1"
 
 [dev-dependencies]
 mockito = "1.2"

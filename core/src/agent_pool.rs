@@ -203,18 +203,19 @@ impl AgentPool {
         token: &str,
         agent_command: &str,
     ) -> Result<(mpsc::Sender<String>, broadcast::Receiver<String>, Vec<String>, bool, Option<String>, Option<String>, broadcast::Sender<String>)> {
-        let parts: Vec<&str> = agent_command.split_whitespace().collect();
+        let parts = shlex::split(agent_command)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| anyhow::anyhow!(
+                "Failed to parse agent command (check quoting): {}", agent_command
+            ))?;
         if parts.is_empty() {
             anyhow::bail!("Empty agent command");
         }
 
-        let command = parts[0];
-        let args = &parts[1..];
+        info!("🚀 Spawning pooled agent: {} {:?} (cwd: {})", parts[0], &parts[1..], self.working_dir.display());
 
-        info!("🚀 Spawning pooled agent: {} {:?} (cwd: {})", command, args, self.working_dir.display());
-
-        let mut child = Command::new(command)
-            .args(args)
+        let mut child = Command::new(&parts[0])
+            .args(&parts[1..])
             .current_dir(&self.working_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

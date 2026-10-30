@@ -220,7 +220,9 @@ pub async fn run_bridge(
     if !memory_path.exists() {
         let _ = std::fs::write(&memory_path, "");
     }
-    bridge = bridge.with_memory_path(memory_path);
+    bridge = bridge.with_memory_path(memory_path)
+        .with_memory_max_bytes(config.memory_max_kb * 1024)
+        .with_ws_max_message_bytes((config.ws_max_message_mb * 1024 * 1024) as usize);
 
     // Spawn a task that auto-renews the pairing code every time it expires.
     // The task stops when `cancel_tx` is dropped at the end of this function.

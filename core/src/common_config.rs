@@ -122,12 +122,25 @@ pub struct CommonConfig {
     /// Number of rotated log files to keep in .aptove-bridge/logs/ (default: 5).
     #[serde(default = "log_file_count_default")]
     pub log_file_count: usize,
+
+    /// Maximum size of MEMORY.md in KB. Bridge warns at 80% and blocks new
+    /// appends (notifying the mobile client) once this limit is reached.
+    /// Default: 1024 KB (1 MB).
+    #[serde(default = "memory_max_kb_default")]
+    pub memory_max_kb: u64,
+
+    /// Maximum WebSocket message size in MB. Increase if users send many large
+    /// images in a single prompt. Default: 50 MB.
+    #[serde(default = "ws_max_message_mb_default")]
+    pub ws_max_message_mb: u64,
 }
 
 fn keep_alive_default() -> bool { true }
 fn log_level_default() -> String { "WARN".to_string() }
 fn log_file_max_mb_default() -> u64 { 10 }
 fn log_file_count_default() -> usize { 5 }
+fn memory_max_kb_default() -> u64 { 1024 }
+fn ws_max_message_mb_default() -> u64 { 50 }
 
 /// Configuration for a single transport.
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -170,6 +183,8 @@ impl Default for CommonConfig {
             log_level: "WARN".to_string(),
             log_file_max_mb: 10,
             log_file_count: 5,
+            memory_max_kb: 1024,
+            ws_max_message_mb: 50,
         }
     }
 }

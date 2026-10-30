@@ -115,6 +115,10 @@ pub struct StdioBridge {
     /// Path to MEMORY.md — loaded into context on new sessions and appended
     /// to by `bridge/appendMemory` notifications from clients.
     memory_path: Option<PathBuf>,
+    /// Maximum size of MEMORY.md in bytes. Warn at 80%, block appends at 100%.
+    memory_max_bytes: u64,
+    /// Maximum WebSocket message size in bytes.
+    ws_max_message_bytes: usize,
 }
 
 impl StdioBridge {
@@ -135,12 +139,26 @@ impl StdioBridge {
             working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             slash_commands: Arc::new(Vec::new()),
             memory_path: None,
+            memory_max_bytes: 1024 * 1024,       // 1 MB default
+            ws_max_message_bytes: 50 * 1024 * 1024, // 50 MB default
         }
     }
 
     /// Set the path to MEMORY.md for persistent memory injection.
     pub fn with_memory_path(mut self, path: PathBuf) -> Self {
         self.memory_path = Some(path);
+        self
+    }
+
+    /// Set the maximum MEMORY.md file size in bytes.
+    pub fn with_memory_max_bytes(mut self, bytes: u64) -> Self {
+        self.memory_max_bytes = bytes;
+        self
+    }
+
+    /// Set the maximum WebSocket message size in bytes.
+    pub fn with_ws_max_message_bytes(mut self, bytes: usize) -> Self {
+        self.ws_max_message_bytes = bytes;
         self
     }
 
@@ -292,6 +310,8 @@ impl StdioBridge {
                     let working_dir = self.working_dir.clone();
                     let slash_commands = Arc::clone(&self.slash_commands);
                     let memory_path = self.memory_path.clone();
+                    let memory_max_bytes = self.memory_max_bytes;
+                    let ws_max_message_bytes = self.ws_max_message_bytes;
 
                     tokio::spawn(async move {
                         // Register connection
@@ -301,7 +321,7 @@ impl StdioBridge {
                             // TLS connection
                             match tls.acceptor.accept(stream).await {
                                 Ok(tls_stream) => {
-                                    handle_connection_generic(tls_stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay, webhook_resolver, webhook_rate_limiter, client_ip_str, working_dir, slash_commands, memory_path).await
+                                    handle_connection_generic(tls_stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay, webhook_resolver, webhook_rate_limiter, client_ip_str, working_dir, slash_commands, memory_path, memory_max_bytes, ws_max_message_bytes).await
                                 }
                                 Err(e) => {
                                     warn!("🚫 TLS handshake failed: {}", e);
@@ -310,7 +330,7 @@ impl StdioBridge {
                             }
                         } else {
                             // Plain TCP connection
-                            handle_connection_generic(stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay, webhook_resolver, webhook_rate_limiter, client_ip_str, working_dir, slash_commands, memory_path).await
+                            handle_connection_generic(stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay, webhook_resolver, webhook_rate_limiter, client_ip_str, working_dir, slash_commands, memory_path, memory_max_bytes, ws_max_message_bytes).await
                         };
 
                         // Always remove connection when done
@@ -347,6 +367,8 @@ async fn handle_connection_generic<S>(
     working_dir: PathBuf,
     slash_commands: Arc<Vec<SlashCommandConfig>>,
     memory_path: Option<PathBuf>,
+    memory_max_bytes: u64,
+    ws_max_message_bytes: usize,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -401,7 +423,7 @@ where
     let prefixed_stream = PrefixedStream::new(request_bytes, stream);
     
     // Continue with WebSocket handling
-    handle_websocket_connection(prefixed_stream, agent_handle, auth_token, agent_pool, push_relay, working_dir, slash_commands, memory_path).await
+    handle_websocket_connection(prefixed_stream, agent_handle, auth_token, agent_pool, push_relay, working_dir, slash_commands, memory_path, memory_max_bytes, ws_max_message_bytes).await
 }
 
 /// Handle a pairing request - validate the code and return connection details
@@ -501,6 +523,12 @@ where
 
     if token.is_empty() {
         let resp = create_http_response(400, "Bad Request", r#"{"error":"missing_token"}"#);
+        stream.write_all(resp.as_bytes()).await?;
+        return Ok(());
+    }
+
+    if token.len() > 256 {
+        let resp = create_http_response(400, "Bad Request", r#"{"error":"invalid_token"}"#);
         stream.write_all(resp.as_bytes()).await?;
         return Ok(());
     }
@@ -698,9 +726,10 @@ fn verify_hmac_sha256(secret: &str, body: &[u8], signature: &str) -> bool {
     };
     mac.update(body);
     let result = mac.finalize().into_bytes();
-    let result_hex = hex::encode(result);
-    // Constant-time comparison via simple string equality (sufficient for HMAC)
-    result_hex == expected_hex
+    // Constant-time comparison to prevent timing side-channel attacks.
+    let expected_bytes = hex::decode(expected_hex).unwrap_or_default();
+    use subtle::ConstantTimeEq;
+    result.ct_eq(expected_bytes.as_slice()).into()
 }
 
 /// Convert a raw body to a human-readable string based on Content-Type.
@@ -809,7 +838,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<S> {
 }
 
 /// Handle WebSocket connection after initial HTTP parsing
-async fn handle_websocket_connection<S>(stream: S, agent_handle: AgentHandle, auth_token: Arc<Option<String>>, agent_pool: Option<Arc<tokio::sync::RwLock<AgentPool>>>, push_relay: Option<Arc<PushRelayClient>>, working_dir: PathBuf, slash_commands: Arc<Vec<SlashCommandConfig>>, memory_path: Option<PathBuf>) -> Result<()>
+async fn handle_websocket_connection<S>(stream: S, agent_handle: AgentHandle, auth_token: Arc<Option<String>>, agent_pool: Option<Arc<tokio::sync::RwLock<AgentPool>>>, push_relay: Option<Arc<PushRelayClient>>, working_dir: PathBuf, slash_commands: Arc<Vec<SlashCommandConfig>>, memory_path: Option<PathBuf>, memory_max_bytes: u64, ws_max_message_bytes: usize) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -880,8 +909,11 @@ where
         Ok(response)
     };
     
-    // Upgrade to WebSocket with auth callback
-    let ws_stream = match tokio_tungstenite::accept_hdr_async(stream, callback).await {
+    // Upgrade to WebSocket with auth callback and message size limit
+    let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+    ws_config.max_message_size = Some(ws_max_message_bytes);
+    ws_config.max_frame_size = Some(ws_max_message_bytes);
+    let ws_stream = match tokio_tungstenite::accept_hdr_async_with_config(stream, callback, Some(ws_config)).await {
         Ok(ws) => ws,
         Err(e) => {
             warn!("🚫 Connection rejected: {}", e);
@@ -906,7 +938,7 @@ where
             handle_websocket_with_handle(ws_stream, agent_handle, push_relay, working_dir).await
         } else {
             if let AgentHandle::Command(ref cmd) = agent_handle {
-                handle_websocket_pooled(ws_stream, cmd.clone(), client_token, pool, push_relay, working_dir.clone(), slash_commands, device_client_id, memory_path).await
+                handle_websocket_pooled(ws_stream, cmd.clone(), client_token, pool, push_relay, working_dir.clone(), slash_commands, device_client_id, memory_path, memory_max_bytes).await
             } else {
                 // InProcess handles don't support pooling yet; fall back to per-connection
                 handle_websocket_with_handle(ws_stream, agent_handle, push_relay, working_dir).await
@@ -928,6 +960,7 @@ async fn handle_websocket_pooled<S>(
     slash_commands: Arc<Vec<SlashCommandConfig>>,
     device_client_id: String,
     memory_path: Option<PathBuf>,
+    memory_max_bytes: u64,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -1069,6 +1102,7 @@ where
     let device_client_id_for_task1 = device_client_id.clone();
     let push_relay_for_register = push_relay.clone();
     let memory_path_for_task1 = memory_path.clone();
+    let memory_max_bytes_task1 = memory_max_bytes;
     let current_session_id_task1 = Arc::clone(&current_session_id);
     let suppress_response_id_task1 = Arc::clone(&suppress_response_id);
     let mut ws_to_agent = tokio::spawn(async move {
@@ -1135,6 +1169,38 @@ where
                             if v.get("method").and_then(|m| m.as_str()) == Some("bridge/appendMemory") {
                                 if let Some(entry_text) = v.pointer("/params/text").and_then(|t| t.as_str()) {
                                     if let Some(ref path) = memory_path_for_task1 {
+                                        // Check file size before appending.
+                                        let current_size = tokio::fs::metadata(path).await
+                                            .map(|m| m.len()).unwrap_or(0);
+                                        let limit = memory_max_bytes_task1;
+                                        let warn_threshold = limit * 80 / 100;
+
+                                        if current_size >= limit {
+                                            error!("MEMORY.md has reached the size limit ({} KB) — append blocked",
+                                                limit / 1024);
+                                            let notif = serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "method": "bridge/memoryLimitReached",
+                                                "params": {
+                                                    "currentBytes": current_size,
+                                                    "limitBytes": limit,
+                                                    "message": format!(
+                                                        "Memory file has reached its limit ({} KB). \
+                                                        No new entries will be saved until you clear it \
+                                                        or increase memory_max_kb in common.toml.",
+                                                        limit / 1024
+                                                    )
+                                                }
+                                            });
+                                            let _ = inject_tx.send(notif.to_string()).await;
+                                            continue;
+                                        } else if current_size >= warn_threshold {
+                                            warn!("MEMORY.md is {}% full ({}/{} KB)",
+                                                current_size * 100 / limit,
+                                                current_size / 1024,
+                                                limit / 1024);
+                                        }
+
                                         let entry = format!("\n{}\n", entry_text.trim());
                                         let mut write_ok = false;
                                         match tokio::fs::OpenOptions::new()
@@ -1254,7 +1320,12 @@ where
                             if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) {
                                 if v.get("method").and_then(|m| m.as_str()) == Some("session/prompt") {
                                     if let Some(ref path) = memory_path_for_task1 {
-                                        if let Ok(contents) = tokio::fs::read_to_string(path).await {
+                                        let too_large = tokio::fs::metadata(path).await
+                                            .map(|m| m.len() > memory_max_bytes_task1)
+                                            .unwrap_or(false);
+                                        if too_large {
+                                            warn!("MEMORY.md exceeds the configured limit — skipping injection");
+                                        } else if let Ok(contents) = tokio::fs::read_to_string(path).await {
                                             let trimmed = contents.trim();
                                             if !trimmed.is_empty() {
                                                 let memory_block = serde_json::json!({
