@@ -1147,7 +1147,7 @@ impl App {
                                 client_secret,
                             });
                             let _ = self.config.save();
-                            self.log_push("Aptove push service configured.".to_string());
+                            self.log_push("Aptove push service configured. Messages are still buffered until the client reconnects.".to_string());
                             self.close_popup();
                         }
                     }
@@ -1204,7 +1204,7 @@ impl App {
                                 client_secret,
                             });
                             let _ = self.config.save();
-                            self.log_push("Self-managed push service configured.".to_string());
+                            self.log_push("Self-managed push service configured. Messages are still buffered until the client reconnects.".to_string());
                             self.close_popup();
                         }
                     }
