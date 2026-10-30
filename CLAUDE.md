@@ -66,6 +66,42 @@ pub trait TransportPlugin: Send + Sync + 'static {
 
 ---
 
+## Bridge Protocol Layer (`bridge/*` namespace)
+
+Every ACP session is wrapped by a bridge-specific protocol layer that operates in the `bridge/*` JSON-RPC namespace. These messages are handled entirely by the bridge — they are never forwarded to the underlying agent process.
+
+**The bridge must not interfere with ACP protocol messages.** ACP messages (`initialize`, `session/*`, `notifications/*`, `session/prompt`, etc.) must be passed through unchanged. The bridge must never modify, suppress, synthesize, or intercept ACP messages except for the explicitly sanctioned extension points documented in `docs/bridge/advanced/`. Before adding any new behavior that touches ACP messages, add a page there and get it reviewed.
+
+### Sanctioned extension points (do not remove without review)
+
+Each item below has a dedicated page in `docs/bridge/advanced/`:
+
+| Behaviour | ACP method(s) touched | Doc page |
+|-----------|-----------------------|----------|
+| Initialize intercept on reconnect | `initialize` | session-resumption |
+| Session request intercept on reconnect | `session/new`, `session/load`, `session/resume` | session-resumption |
+| Synthetic `session/load` error on fresh agents | `session/load` | session-load-error |
+| Memory injection into first `session/prompt` | `session/prompt` | memory-injection |
+| Silent memory-consolidation `session/prompt` | `session/prompt` (synthesized) | memory-consolidation |
+| Memory-update response suppression | Agent responses to `__memory_update_*` ID | memory-consolidation |
+| `available_commands_update` injection | `session/update` (synthesized) | commands-injection |
+| Response buffering and replay | Any agent message | sessions |
+
+### `bridge/*` messages (never forwarded to agent)
+
+| Direction | Method | Purpose |
+|-----------|--------|---------|
+| bridge → client | `bridge/identify` | First message; announces `bridgeAgentId` and `cwd` for identity verification |
+| bridge → client | `bridge/requestPushToken` | Ask client to send its push token (only when push relay configured) |
+| bridge → client | `bridge/bufferReplayComplete` | Signal end of buffered message replay after reconnect |
+| bridge → client | `bridge/memoryLimitReached` | Notify client that `MEMORY.md` is full |
+| bridge → client | `bridge/remoteUserMessage` | Broadcast prompt content to other connected devices (multi-device sync) |
+| client → bridge | `bridge/registerPushToken` | Register device for push notifications |
+| client → bridge | `bridge/unregisterPushToken` | Deregister device |
+| client → bridge | `bridge/appendMemory` | Append a note to `MEMORY.md` |
+
+---
+
 ## TUI Guidelines
 
 ### Dark Background Requirement
