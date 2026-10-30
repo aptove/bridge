@@ -1335,7 +1335,7 @@ where
                         // Also track session request IDs so Task 2 can cache the
                         // session/new response.
                         if needs_init_capture {
-                            if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                                 let method = v.get("method").and_then(|m| m.as_str());
                                 if method == Some("session/load") {
                                     if let Some(req_id) = v.get("id") {
