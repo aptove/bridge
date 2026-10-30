@@ -183,7 +183,8 @@ pub async fn run_bridge(
     let mut bridge = StdioBridge::new(agent_command.clone(), port)
         .with_bind_addr(bind_address)
         .with_auth_token(Some(config.auth_token.clone()))
-        .with_pairing(Arc::clone(&pm));
+        .with_pairing(Arc::clone(&pm))
+        .with_bridge_agent_id(config.agent_id.clone());
 
     if let Some(tls) = tls_config {
         bridge = bridge.with_tls(tls);

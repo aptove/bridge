@@ -119,6 +119,10 @@ pub struct StdioBridge {
     memory_max_bytes: u64,
     /// Maximum WebSocket message size in bytes.
     ws_max_message_bytes: usize,
+    /// Stable UUID identifying this bridge instance (from CommonConfig.agent_id).
+    /// Sent to every connected client as the first `bridge/identify` notification
+    /// so the mobile app can verify it connected to the expected bridge.
+    bridge_agent_id: String,
 }
 
 impl StdioBridge {
@@ -141,6 +145,7 @@ impl StdioBridge {
             memory_path: None,
             memory_max_bytes: 1024 * 1024,       // 1 MB default
             ws_max_message_bytes: 50 * 1024 * 1024, // 50 MB default
+            bridge_agent_id: String::new(),
         }
     }
 
@@ -159,6 +164,14 @@ impl StdioBridge {
     /// Set the maximum WebSocket message size in bytes.
     pub fn with_ws_max_message_bytes(mut self, bytes: usize) -> Self {
         self.ws_max_message_bytes = bytes;
+        self
+    }
+
+    /// Set the stable bridge agent ID (from CommonConfig.agent_id).
+    /// This is sent to every connecting client as the first message so
+    /// the mobile app can verify it connected to the expected bridge.
+    pub fn with_bridge_agent_id(mut self, id: String) -> Self {
+        self.bridge_agent_id = id;
         self
     }
 
@@ -312,6 +325,7 @@ impl StdioBridge {
                     let memory_path = self.memory_path.clone();
                     let memory_max_bytes = self.memory_max_bytes;
                     let ws_max_message_bytes = self.ws_max_message_bytes;
+                    let bridge_agent_id = self.bridge_agent_id.clone();
 
                     tokio::spawn(async move {
                         // Register connection
@@ -321,7 +335,7 @@ impl StdioBridge {
                             // TLS connection
                             match tls.acceptor.accept(stream).await {
                                 Ok(tls_stream) => {
-                                    handle_connection_generic(tls_stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay, webhook_resolver, webhook_rate_limiter, client_ip_str, working_dir, slash_commands, memory_path, memory_max_bytes, ws_max_message_bytes).await
+                                    handle_connection_generic(tls_stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay, webhook_resolver, webhook_rate_limiter, client_ip_str, working_dir, slash_commands, memory_path, memory_max_bytes, ws_max_message_bytes, bridge_agent_id).await
                                 }
                                 Err(e) => {
                                     warn!("🚫 TLS handshake failed: {}", e);
@@ -330,7 +344,7 @@ impl StdioBridge {
                             }
                         } else {
                             // Plain TCP connection
-                            handle_connection_generic(stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay, webhook_resolver, webhook_rate_limiter, client_ip_str, working_dir, slash_commands, memory_path, memory_max_bytes, ws_max_message_bytes).await
+                            handle_connection_generic(stream, agent_handle, auth_token, pairing_manager, agent_pool, push_relay, webhook_resolver, webhook_rate_limiter, client_ip_str, working_dir, slash_commands, memory_path, memory_max_bytes, ws_max_message_bytes, bridge_agent_id).await
                         };
 
                         // Always remove connection when done
@@ -369,6 +383,7 @@ async fn handle_connection_generic<S>(
     memory_path: Option<PathBuf>,
     memory_max_bytes: u64,
     ws_max_message_bytes: usize,
+    bridge_agent_id: String,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -423,7 +438,7 @@ where
     let prefixed_stream = PrefixedStream::new(request_bytes, stream);
     
     // Continue with WebSocket handling
-    handle_websocket_connection(prefixed_stream, agent_handle, auth_token, agent_pool, push_relay, working_dir, slash_commands, memory_path, memory_max_bytes, ws_max_message_bytes).await
+    handle_websocket_connection(prefixed_stream, agent_handle, auth_token, agent_pool, push_relay, working_dir, slash_commands, memory_path, memory_max_bytes, ws_max_message_bytes, bridge_agent_id).await
 }
 
 /// Handle a pairing request - validate the code and return connection details
@@ -838,7 +853,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<S> {
 }
 
 /// Handle WebSocket connection after initial HTTP parsing
-async fn handle_websocket_connection<S>(stream: S, agent_handle: AgentHandle, auth_token: Arc<Option<String>>, agent_pool: Option<Arc<tokio::sync::RwLock<AgentPool>>>, push_relay: Option<Arc<PushRelayClient>>, working_dir: PathBuf, slash_commands: Arc<Vec<SlashCommandConfig>>, memory_path: Option<PathBuf>, memory_max_bytes: u64, ws_max_message_bytes: usize) -> Result<()>
+async fn handle_websocket_connection<S>(stream: S, agent_handle: AgentHandle, auth_token: Arc<Option<String>>, agent_pool: Option<Arc<tokio::sync::RwLock<AgentPool>>>, push_relay: Option<Arc<PushRelayClient>>, working_dir: PathBuf, slash_commands: Arc<Vec<SlashCommandConfig>>, memory_path: Option<PathBuf>, memory_max_bytes: u64, ws_max_message_bytes: usize, bridge_agent_id: String) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -938,7 +953,7 @@ where
             handle_websocket_with_handle(ws_stream, agent_handle, push_relay, working_dir).await
         } else {
             if let AgentHandle::Command(ref cmd) = agent_handle {
-                handle_websocket_pooled(ws_stream, cmd.clone(), client_token, pool, push_relay, working_dir.clone(), slash_commands, device_client_id, memory_path, memory_max_bytes).await
+                handle_websocket_pooled(ws_stream, cmd.clone(), client_token, pool, push_relay, working_dir.clone(), slash_commands, device_client_id, memory_path, memory_max_bytes, bridge_agent_id).await
             } else {
                 // InProcess handles don't support pooling yet; fall back to per-connection
                 handle_websocket_with_handle(ws_stream, agent_handle, push_relay, working_dir).await
@@ -949,6 +964,33 @@ where
     }
 }
 
+/// Pre-ACP bridge protocol handshake.
+///
+/// Runs immediately after the WebSocket connection is established, before any ACP
+/// message exchange begins. Sends `bridge/identify` so the mobile client can verify
+/// it connected to the expected bridge (by `bridgeAgentId`) rather than a stale
+/// endpoint reused by a different project.
+async fn bridge_handshake<S>(
+    ws_sender: &mut futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<S>, Message>,
+    bridge_agent_id: &str,
+    working_dir: &std::path::Path,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "bridge/identify",
+        "params": {
+            "bridgeAgentId": bridge_agent_id,
+            "cwd": working_dir.to_string_lossy()
+        }
+    });
+    ws_sender.send(Message::Text(serde_json::to_string(&msg)?.into())).await
+        .context("Failed to send bridge/identify")?;
+    Ok(())
+}
+
 /// Handle WebSocket connection with agent pool (keep-alive mode)
 async fn handle_websocket_pooled<S>(
     ws_stream: tokio_tungstenite::WebSocketStream<S>,
@@ -956,16 +998,22 @@ async fn handle_websocket_pooled<S>(
     token: String,
     pool: Arc<tokio::sync::RwLock<AgentPool>>,
     push_relay: Option<Arc<PushRelayClient>>,
-    _working_dir: PathBuf,
+    working_dir: PathBuf,
     slash_commands: Arc<Vec<SlashCommandConfig>>,
     device_client_id: String,
     memory_path: Option<PathBuf>,
     memory_max_bytes: u64,
+    bridge_agent_id: String,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+
+    // Bridge protocol handshake — must be the very first message sent to the client,
+    // before any ACP exchange. The mobile app validates bridgeAgentId here and
+    // disconnects immediately if it doesn't match the expected bridge.
+    bridge_handshake(&mut ws_sender, &bridge_agent_id, &working_dir).await?;
 
     // Get or spawn agent from pool
     let (ws_to_agent_tx, mut agent_to_ws_rx, buffered, was_reused, cached_init, cached_session, broadcast_tx) = {
@@ -1036,12 +1084,13 @@ where
         // Signal iOS that buffer replay is complete so it can finalise any
         // pending sendMessage() response that was interrupted by a background disconnect.
         if was_reused {
-            let notif = format!(
-                r#"{{"jsonrpc":"2.0","method":"bridge/bufferReplayComplete","params":{{"count":{}}}}}"#,
-                total
-            );
+            let notif = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "bridge/bufferReplayComplete",
+                "params": { "count": total, "bridgeAgentId": bridge_agent_id }
+            });
             debug!("Sending bridge/bufferReplayComplete (count={})", total);
-            if let Err(e) = ws_sender.send(Message::Text(notif.into())).await {
+            if let Err(e) = ws_sender.send(Message::Text(serde_json::to_string(&notif).unwrap_or_default().into())).await {
                 error!("Failed to send bufferReplayComplete: {}", e);
             }
         }
@@ -1050,8 +1099,12 @@ where
     // If push relay is configured, ask the client to send its push token.
     // The bridge drives this so the client never needs to store pushRelayUrl.
     if push_relay.is_some() {
-        let req = r#"{"jsonrpc":"2.0","method":"bridge/requestPushToken","params":{}}"#;
-        if let Err(e) = ws_sender.send(Message::Text(req.into())).await {
+        let req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "bridge/requestPushToken",
+            "params": { "bridgeAgentId": bridge_agent_id }
+        });
+        if let Err(e) = ws_sender.send(Message::Text(serde_json::to_string(&req).unwrap_or_default().into())).await {
             error!("Failed to send bridge/requestPushToken: {}", e);
         }
     }
@@ -1105,6 +1158,7 @@ where
     let memory_max_bytes_task1 = memory_max_bytes;
     let current_session_id_task1 = Arc::clone(&current_session_id);
     let suppress_response_id_task1 = Arc::clone(&suppress_response_id);
+    let bridge_agent_id_task1 = bridge_agent_id.clone();
     let mut ws_to_agent = tokio::spawn(async move {
         // True once memory has been prepended to the first session/prompt of this connection.
         // Pre-set to true for reused agents resuming an existing session (session/load) since
@@ -1182,6 +1236,7 @@ where
                                                 "jsonrpc": "2.0",
                                                 "method": "bridge/memoryLimitReached",
                                                 "params": {
+                                                    "bridgeAgentId": bridge_agent_id_task1,
                                                     "currentBytes": current_size,
                                                     "limitBytes": limit,
                                                     "message": format!(
@@ -1280,7 +1335,7 @@ where
                         // Also track session request IDs so Task 2 can cache the
                         // session/new response.
                         if needs_init_capture {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) {
                                 let method = v.get("method").and_then(|m| m.as_str());
                                 if method == Some("session/load") {
                                     if let Some(req_id) = v.get("id") {
@@ -1357,6 +1412,7 @@ where
                                         "jsonrpc": "2.0",
                                         "method": "bridge/remoteUserMessage",
                                         "params": {
+                                            "bridgeAgentId": bridge_agent_id_task1,
                                             "senderId": device_client_id_for_task1,
                                             "content": prompt_content
                                         }
