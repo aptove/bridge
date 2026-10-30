@@ -215,6 +215,17 @@ impl App {
             self.start_bridge();
         }
 
+        // First-run: bridge has never been configured in this folder.
+        // Emit a persistent WARN so the user sees it in the log panel once setup finishes.
+        let is_first_run = matches!(self.wizard, Some(ref w) if !w.cancelable);
+        if is_first_run {
+            self.log_push_warn(
+                "First run in this folder — starting setup wizard. \
+                 All settings can be updated at any time via /config."
+                .to_string(),
+            );
+        }
+
         // Main event loop.
         loop {
             if let Ok(size) = terminal.size() {
@@ -406,6 +417,13 @@ impl App {
             WizardStep::PushSetup { .. } => {
                 // Skip push setup.
                 self.advance_past_push();
+            }
+            WizardStep::TransportPick { .. } if !cancelable => {
+                // Back to agent configuration, pre-filling the current command.
+                let current = self.config.agent_command.clone().unwrap_or_default();
+                if let Some(ref mut w) = self.wizard {
+                    w.step = WizardStep::ConfigureAgent { input: current };
+                }
             }
             _ if cancelable => {
                 // Cancel wizard and return to running screen.

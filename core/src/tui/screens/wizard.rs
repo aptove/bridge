@@ -217,6 +217,12 @@ pub fn wizard_url_at(step: &WizardStep, col: u16, row: u16, term: Rect) -> Optio
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 pub fn render_wizard(frame: &mut Frame, state: &WizardState) {
+    let setup_note: Option<&str> = if !state.cancelable {
+        Some("Tip: all settings can be updated later via /config")
+    } else {
+        None
+    };
+
     match &state.step {
         WizardStep::ConfigureAgent { input } => {
             let hint = if state.cancelable {
@@ -224,7 +230,7 @@ pub fn render_wizard(frame: &mut Frame, state: &WizardState) {
             } else {
                 "Enter save"
             };
-            let inner = wizard_panel(frame, "Configure Agent", hint);
+            let inner = wizard_panel(frame, "Configure Agent", hint, setup_note);
 
             // Instruction
             frame.render_widget(
@@ -262,9 +268,9 @@ pub fn render_wizard(frame: &mut Frame, state: &WizardState) {
             let pick_hint = if state.cancelable {
                 "\u{2191}/\u{2193} navigate   Enter select   Esc cancel"
             } else {
-                "\u{2191}/\u{2193} navigate   Enter select   unconfigured \u{2192} inline setup"
+                "\u{2191}/\u{2193} navigate   Enter select   unconfigured \u{2192} inline setup   Esc back"
             };
-            let inner = wizard_panel(frame, title, pick_hint);
+            let inner = wizard_panel(frame, title, pick_hint, setup_note);
             let plugins = transport::all();
             let items: Vec<ListItem> = plugins.iter().enumerate().map(|(i, plugin)| {
                 let prefix = if i == *selected { "> " } else { "  " };
@@ -287,6 +293,7 @@ pub fn render_wizard(frame: &mut Frame, state: &WizardState) {
                 frame,
                 &format!("{} Setup", title),
                 "Tab next field   Enter submit   Esc back",
+                None,
             );
             let wizard_fields = plugin.and_then(|p| p.wizard_fields()).unwrap_or_default();
             let labels: Vec<&str> = wizard_fields.iter().map(|f| f.label).collect();
@@ -296,7 +303,7 @@ pub fn render_wizard(frame: &mut Frame, state: &WizardState) {
         WizardStep::PluginLoading { transport_name } => {
             let plugin = transport::get(transport_name.as_str());
             let title = plugin.map(|p| p.display_name()).unwrap_or("Transport");
-            let inner = wizard_panel(frame, &format!("{} Setup", title), "");
+            let inner = wizard_panel(frame, &format!("{} Setup", title), "", None);
             frame.render_widget(
                 Paragraph::new(format!("Configuring {}...", title))
                     .style(Style::default().fg(Color::Yellow)),
@@ -311,12 +318,13 @@ pub fn render_wizard(frame: &mut Frame, state: &WizardState) {
                 frame,
                 "Push Notifications (optional)",
                 "Tab next field   Enter submit   Esc skip",
+                None,
             );
             render_form_dynamic(frame, inner, &labels, &values, *field_idx, error.as_deref());
         }
 
         WizardStep::Done => {
-            let inner = wizard_panel(frame, "Setup Complete", "");
+            let inner = wizard_panel(frame, "Setup Complete", "", None);
             frame.render_widget(
                 Paragraph::new("Starting bridge...").style(Style::default().fg(Color::Green)),
                 Rect { y: inner.y + 2, height: 2, ..inner },
@@ -327,7 +335,7 @@ pub fn render_wizard(frame: &mut Frame, state: &WizardState) {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-fn wizard_panel(frame: &mut Frame, title: &str, hint: &str) -> Rect {
+fn wizard_panel(frame: &mut Frame, title: &str, hint: &str, note: Option<&str>) -> Rect {
     let area = frame.area();
     let popup = centered(70, 80, area);
     frame.render_widget(Clear, popup);
@@ -338,6 +346,12 @@ fn wizard_panel(frame: &mut Frame, title: &str, hint: &str) -> Rect {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    if let Some(note) = note {
+        frame.render_widget(
+            Paragraph::new(Span::styled(note, Style::default().fg(Color::DarkGray))),
+            Rect { y: inner.y + inner.height.saturating_sub(2), height: 1, ..inner },
+        );
+    }
     if !hint.is_empty() {
         frame.render_widget(
             Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),
