@@ -257,6 +257,16 @@ pub fn render_wizard(frame: &mut Frame, state: &WizardState) {
                 ])),
                 Rect { y: inner.y + 5, height: 1, ..inner },
             );
+
+            // First-run notice — visible inside the panel since the log panel is hidden during setup.
+            if !state.cancelable {
+                frame.render_widget(
+                    Paragraph::new(
+                        "⚠  First run in this folder — bridge is starting in setup mode."
+                    ).style(Style::default().fg(Color::Yellow)),
+                    Rect { y: inner.y + 7, height: 1, ..inner },
+                );
+            }
         }
 
         WizardStep::TransportPick { selected, statuses, .. } => {
