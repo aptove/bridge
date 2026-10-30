@@ -145,7 +145,7 @@ dependencies = [
 
 [[package]]
 name = "aptove-bridge"
-version = "0.2.9"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "aptove-bridge-core",
@@ -157,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "aptove-bridge-core"
-version = "0.2.9"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "arboard",
