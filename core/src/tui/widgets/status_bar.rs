@@ -1,6 +1,7 @@
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
+    text::{Line, Span},
     widgets::Paragraph,
     Frame,
 };
@@ -19,22 +20,30 @@ pub fn render_status_bar(
     push_up: bool,
     keep_alive: bool,
 ) {
-    let mut parts = vec![format!(" Aptove Bridge v{}", version)];
+    let base = Style::default().bg(Color::DarkGray).fg(Color::White);
+    let mut spans: Vec<Span> = vec![Span::styled(
+        format!(" Aptove Bridge v{}", version),
+        base,
+    )];
 
     for t in transports {
-        let icon = if t.up { "◉" } else { "○" };
-        parts.push(format!("  [{} {}]", t.name, icon));
+        let dot_color = if t.up { Color::Green } else { Color::Red };
+        spans.push(Span::styled(format!("  [{} ", t.name), base));
+        spans.push(Span::styled("●", Style::default().bg(Color::DarkGray).fg(dot_color)));
+        spans.push(Span::styled("]", base));
     }
 
     if push_up {
-        parts.push("  [push ◉]".to_string());
+        spans.push(Span::styled("  [push ", base));
+        spans.push(Span::styled("●", Style::default().bg(Color::DarkGray).fg(Color::Green)));
+        spans.push(Span::styled("]", base));
     }
 
-    let awake_icon = if keep_alive { "◉" } else { "○" };
-    parts.push(format!("  [awake {}]", awake_icon));
+    let ka_color = if keep_alive { Color::Green } else { Color::Red };
+    spans.push(Span::styled("  [keep alive ", base));
+    spans.push(Span::styled("●", Style::default().bg(Color::DarkGray).fg(ka_color)));
+    spans.push(Span::styled("]", base));
 
-    let text = parts.join("");
-    let para = Paragraph::new(text)
-        .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    let para = Paragraph::new(Line::from(spans)).style(base);
     frame.render_widget(para, area);
 }
